@@ -1,0 +1,234 @@
+---
+title: "Comparative Data Analysis of Virtual Screening
+Methodologies for Predicting Urease Inhibitory Activity"
+output: html_notebook
+---
+
+### **User Configuration**
+
+This section allows the user to specify the directory where the input
+data is stored. The `method_type` parameter determines the type of
+virtual screening (VS) method being processed (`Docking`, `MM-GBSA`, or
+`EnsembleDocking`). If experimental IC₅₀ values are stored in a separate
+file, the path to this file should be provided.
+
+Notate that Docking (standard) has a similar output to Induced-Fit
+Docking and Quantum-Polarized Ligand-Docking.
+
+```{r}
+
+# Load required libraries
+library(openxlsx)  # For reading/writing Excel files
+library(dplyr)     # For data manipulation
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the path to the input files and method type
+path <- "path/to/your/data"  # Set your working directory
+method_type <- "Docking"  # Options: "Docking", "MMGBSA", "EnsembleDocking"
+ic50_file <- "IC50_data.csv"  # If available, path to IC50 data
+
+
+
+```
+
+### **Loading Data**
+
+-   If `method_type = "EnsembleDocking"`, multiple CSV files are loaded
+    and combined into a single dataset.
+
+-   The script extracts frame numbers from the filenames to properly
+    annotate the dataset.
+
+-   Assumes filenames follow the format \*\_n.csv where n is the frame
+    number.
+
+-   If `method_type` is `Docking` or `MM-GBSA`, a single input file is
+    read, either in CSV or XLSX format.
+
+```{r}
+# -------------------------
+# Load Data
+# -------------------------
+
+if (method_type == "EnsembleDocking") {
+  # Get a list of all CSV files in the directory
+  # This is essential for ensemble docking, where multiple frames are analyzed.
+  file_list <- list.files(path, pattern = "*.csv", full.names = TRUE)
+  
+  # Initialize an empty list to store data
+  data_list <- list()
+  
+  # Loop through each CSV file to extract relevant data
+  for (file_path in file_list) {
+    data <- read.csv(file_path, stringsAsFactors = FALSE)
+    
+    # Extract Frame number from filename
+    # Assumes filenames follow the format *_n.csv where n is the frame number.
+    frame_number <- gsub(".*_SP_(\\d+)\\.csv", "\\1", basename(file_path))
+    data$Frame <- as.numeric(frame_number)
+    
+    data_list[[length(data_list) + 1]] <- data
+  }
+  
+  # Combine all extracted data into a single dataframe
+  data <- bind_rows(data_list)
+  
+} else {
+  # Single file processing for Docking/MMGBSA
+  # The script expects either a CSV or XLSX file containing processed docking or MMGBSA data.
+  file_name <- "input_file.csv"  # Modify based on actual data
+  file_path <- file.path(path, file_name)
+  
+  if (grepl(".csv$", file_name, ignore.case = TRUE)) {
+    data <- read.csv(file_path, stringsAsFactors = FALSE)
+  } else if (grepl(".xlsx$", file_name, ignore.case = TRUE)) {
+    data <- read.xlsx(file_path, sheet = 1)
+  } else {
+    stop("Unsupported file format. Please use CSV or XLSX.")
+  }
+}
+
+```
+
+### **Preprocessing**
+
+-   Removes unnecessary rows such as minimized structures that may have
+    been retained in docking outputs.
+
+-   Selects the appropriate columns depending on the method type.
+
+-   Ensures that only available columns are included in the final
+    dataset.
+
+```{r}
+# -------------------------
+# Preprocessing
+# -------------------------
+
+# Remove minimized structures if present
+data <- data[!grepl(".* - minimized", data$Title), ]  
+
+# Define column names based on method type
+if (method_type == "Docking" || method_type == "EnsembleDocking") {
+  cols_selected <- c("Title", "docking.score", "glide.ligand.efficiency", 
+                     "glide.gscore", "glide.emodel", "glide.energy", "glide.einternal", 
+                     "XP.PoseRank", "IC50.uM.Exp", "pIC50.Exp", "Frame")
+} else if (method_type == "MMGBSA") {
+  cols_selected <- c("Title", "r_psp_MMGBSA_dG_Bind", "r_psp_MMGBSA_dG_Bind_Coulomb", 
+                     "r_psp_MMGBSA_dG_Bind_Hbond", "r_psp_MMGBSA_dG_Bind_Lipo", 
+                     "r_psp_MMGBSA_dG_Bind_Solv_GB", "r_psp_MMGBSA_dG_Bind_vdW", 
+                     "r_psp_Prime_MMGBSA_ligand_efficiency", "IC50", "pIC50")
+} else {
+  stop("Invalid method type. Use 'Docking', 'MMGBSA', or 'EnsembleDocking'.")
+}
+
+# Retain only available columns
+data <- data[, cols_selected, drop = FALSE]
+
+
+```
+
+### **Handling Experimental IC₅₀ Data**
+
+-   If an external file containing IC₅₀ values is available, it is
+    merged with the dataset.
+
+-   Compounds without experimental IC₅₀ values are assigned a default
+    value (`800 µM` for IC₅₀ and `3.09` for pIC₅₀) to maintain data
+    consistency.
+
+-   Converts IC₅₀ values to numeric format to ensure compatibility with
+    statistical analyses.
+
+```{r}
+# -------------------------
+# Handling Experimental IC50 Data
+# -------------------------
+
+if (file.exists(ic50_file)) {
+  ic50_data <- read.csv(ic50_file, stringsAsFactors = FALSE)
+  data$IC50 <- ic50_data$IC50.uM.Exp[match(data$Title, ic50_data$Title)]
+  data$pIC50 <- ic50_data$pIC50[match(data$Title, ic50_data$Title)]
+}
+
+# Replace missing IC50 values with defaults
+data$IC50 <- ifelse(is.na(data$IC50), 800, data$IC50)
+data$pIC50 <- ifelse(is.na(data$pIC50), 3.09, data$pIC50)
+
+# Convert to numeric
+data$IC50 <- as.numeric(data$IC50)
+data$pIC50 <- as.numeric(data$pIC50)
+
+
+
+```
+
+### **Docking-Specific Processing**
+
+-   The dataset is sorted by compound name (`Title`) and docking score,
+    ensuring that the best-ranked poses are prioritized.
+
+-   Each compound is assigned a `Pose` number, indicating its ranking
+    within the set of poses based on docking score.
+
+```{r}
+# -------------------------
+# Docking-Specific Processing
+# -------------------------
+if (method_type == "Docking" || method_type == "EnsembleDocking") {
+  # Sort by Title and docking score
+data <- data[order(data$Title, data$docking.score), ]
+
+  # Assign Pose numbers
+data$Poses <- ave(data$docking.score, data$Title, FUN = function(x) seq_along(x))
+}
+
+```
+
+### **MMGBSA-Specific Processing**
+
+-   The dataset is sorted by compound name (`Title`) and MM-GBSA binding
+    energy (`r_psp_MMGBSA_dG_Bind`), ensuring that the most favorable
+    energy values are ranked first.
+
+-   Each compound is assigned a `Pose` number based on MM-GBSA binding
+    energy.
+
+```{r}
+
+# -------------------------
+# MMGBSA-Specific Processing
+# -------------------------
+if (method_type == "MMGBSA") {
+  # Sort by Title and binding energy
+data <- data[order(data$Title, data$r_psp_MMGBSA_dG_Bind), ]
+
+  # Assign Pose numbers
+data$Poses <- ave(data$r_psp_MMGBSA_dG_Bind, data$Title, FUN = function(x) seq_along(x))
+}
+
+
+```
+
+### **Exporting Processed Data**
+
+-   The final processed dataset is saved as an Excel file
+    (`combined_data.xlsx`) for downstream statistical analysis.
+
+-   Displays the first few rows of the processed dataset to verify
+    correctness.
+
+```{r}
+# -------------------------
+# Export Processed Data
+# -------------------------
+
+output_file <- file.path(path, "combined_data.xlsx")
+write.xlsx(data, output_file)
+
+# Display first few rows
+head(data)
+```

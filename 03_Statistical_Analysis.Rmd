@@ -1,0 +1,1130 @@
+---
+title: "Comparative Data Analysis of Virtual Screening
+Methodologies for Predicting Urease Inhibitory Activity"
+output: html_notebook
+---
+
+# **Load correlation data & merging**
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(readxl)
+library(openxlsx)
+library(stringr)  # Necessary to extract the first number of NVariant
+
+# -------------------------
+# Define File Paths
+# -------------------------
+
+# Base path where the files are located
+base_path <- "03_Correlations/"
+
+# List of correlation files
+file_list <- list(
+  paste0(base_path, "Correlation_Variant_1_1_Docking.xlsx"),
+  paste0(base_path, "Correlation_Variant_1_2_QPLD_100poses.xlsx"),
+  paste0(base_path, "Correlation_Variant_1_3_MMGBSA_100poses.xlsx"),
+  paste0(base_path, "Correlation_Variant_2_1_IFD.xlsx"),
+  paste0(base_path, "Correlation_Variant_2_2_MMGBSA_100poses.xlsx"),
+  paste0(base_path, "Correlation_Variant_3_ED.xlsx"),
+  paste0(base_path, "Correlation_Variant_4_MMGBSA.xlsx"),
+  paste0(base_path, "Correlation_Variant_5_QPLD_1E9Y.xlsx"),
+  paste0(base_path, "Correlation_Variant_5_QPLD_6QSU.xlsx"),
+  paste0(base_path, "Correlation_Variant_5_QPLD_6ZJA.xlsx")
+)
+
+# -------------------------
+# Function to Process Files
+# -------------------------
+
+process_correlation_file <- function(file) {
+  cat("\n📂 Processing:", file, "\n")
+  
+  # Efficiently read Excel file
+  df <- read_excel(file, col_types = "guess")
+  
+  # Rename Variant to NVariant and create new Variant column
+  df <- df %>%
+    rename(NVariant = Variant) %>%
+    mutate(
+      # Extract the first number from NVariant and convert to integer
+      Variant = as.integer(str_extract(NVariant, "^[0-9]+"))
+    )
+  
+  # Add Frame column for Variants 1 and 2 (set to "0" as character)
+  if (grepl("Variant_1_|Variant_2_", file)) {
+    df <- df %>%
+      mutate(Frame = "0") %>%
+      relocate(Frame, .after = Protein)  # Ensure Frame is in second position
+  } else {
+    # Ensure Frame exists and is a character type in all files
+    df <- df %>%
+      mutate(Frame = as.character(Frame))
+  }
+  
+  return(df)
+}
+
+# -------------------------
+# Load and Process All Files
+# -------------------------
+
+correlation_data_list <- lapply(file_list, process_correlation_file)
+
+# -------------------------
+# Merge All Dataframes
+# -------------------------
+
+# Bind all processed dataframes together
+combined_correlation_data <- bind_rows(correlation_data_list)
+
+# Save path for the combined file in RDS
+rds_file <- paste0(base_path, "Merged_Correlation_Data.rds")
+
+# Save in RDS format (much more efficient than Excel)
+saveRDS(combined_correlation_data, rds_file)
+
+# Optionally, we also save in Excel
+#xlsx_file <- paste0(base_path, "Merged_Correlation_Data.xlsx")
+#write.xlsx(combined_correlation_data, xlsx_file)
+
+cat("\n✅ All files processed and merged successfully!\n")
+cat("📂 Saved as:\n - RDS:", rds_file)
+
+
+```
+
+# **Load rds file with all data**
+
+This is
+
+```{r}
+# Load dataframe in R from RDS
+df <- readRDS("03_Correlations/Merged_Correlation_Data.rds")
+
+# Remove rows with any NA values
+df <- na.omit(df)
+
+# Check the dimensions after removal
+dim(df)
+
+original_n <- nrow(readRDS("03_Correlations/Merged_Correlation_Data.rds"))
+new_n <- nrow(df)
+
+cat("Rows removed due to NA values:", original_n - new_n, "\n")
+```
+
+# **Is Considering More Poses Better?**
+
+## Fig. 2
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+
+# Function to compute summary statistics
+compute_summary <- function(data) {
+  data %>%
+    group_by(DataFusion) %>%
+    summarise(
+      Mean_Pearson = mean(Pearson, na.rm = TRUE),
+      Mean_Spearman = mean(Spearman, na.rm = TRUE),
+      Mean_MAE = mean(MAE, na.rm = TRUE),
+      Mean_RMSE = mean(RMSE, na.rm = TRUE),
+      Mean_IRM = mean(IRM, na.rm = TRUE),
+      N = n()
+    ) %>%
+    arrange(desc(Mean_Spearman))  # Sorting by highest Spearman correlation
+}
+
+# 🔹 Filter only IC50 data
+df_ic50 <- df %>%
+  filter(ExpVariable == "IC50")
+
+# 🔹 Compute summary statistics for Poses 1-10
+summary_10_poses <- df_ic50 %>%
+  filter(Pose >= 1, Pose <= 10) %>%
+  compute_summary() %>%
+  rename_with(~ paste0(., "_10Poses"))
+
+# 🔹 Compute summary statistics for Poses 1-100
+summary_100_poses <- df_ic50 %>%
+  filter(Pose >= 1, Pose <= 100) %>%
+  compute_summary() %>%
+  rename_with(~ paste0(., "_100Poses"))
+
+# 🔹 Standardize column names before joining
+summary_10_poses <- summary_10_poses %>%
+  rename(DataFusion = DataFusion_10Poses)
+
+summary_100_poses <- summary_100_poses %>%
+  rename(DataFusion = DataFusion_100Poses)
+
+# 🔹 Find common Data Fusion methods
+common_datafusion <- intersect(summary_10_poses$DataFusion, summary_100_poses$DataFusion)
+
+# 🔹 Filter both datasets to retain only common DataFusion methods
+summary_10_poses_filtered <- summary_10_poses %>%
+  filter(DataFusion %in% common_datafusion)
+
+summary_100_poses_filtered <- summary_100_poses %>%
+  filter(DataFusion %in% common_datafusion)
+
+# 🔹 Merge the two datasets
+comparison_df <- left_join(summary_10_poses_filtered, summary_100_poses_filtered, by = "DataFusion")
+
+# 🔹 Compute relative change between 10 and 100 poses for each metric
+comparison_df <- comparison_df %>%
+  mutate(
+    Pearson_Change = (Mean_Pearson_100Poses - Mean_Pearson_10Poses) / abs(Mean_Pearson_10Poses) * 100,
+    Spearman_Change = (Mean_Spearman_100Poses - Mean_Spearman_10Poses) / abs(Mean_Spearman_10Poses) * 100,
+    MAE_Change = (Mean_MAE_100Poses - Mean_MAE_10Poses) / abs(Mean_MAE_10Poses) * 100,
+    RMSE_Change = (Mean_RMSE_100Poses - Mean_RMSE_10Poses) / abs(Mean_RMSE_10Poses) * 100,
+    IRM_Change = (Mean_IRM_100Poses - Mean_IRM_10Poses) / abs(Mean_IRM_10Poses) * 100
+  )
+
+
+# Define custom colors for Data Fusion Methods
+fusion_colors <- c(
+  "Median" = "#1f77b4",
+  "Minimum" = "#ff7f0e",
+  "Arithmetic" = "#2ca02c",
+  "Geometric" = "#d62728",
+  "Harmonic" = "#9467bd",
+  "Euclidean" = "#8c564b"
+)
+
+# Define custom themes
+custom_theme_left <- theme(
+  legend.position = "none",
+  axis.title = element_text(color = "black", face = "bold", size = 18),
+  axis.text = element_text(colour = "black", face = "bold", size = 17),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  plot.title = element_text(size = 18, face = "bold")
+)
+
+custom_theme_right <- theme(
+  legend.position = "none",
+  axis.title.y = element_blank(),  # Remove Y-axis title
+  axis.text.y = element_blank(),   # Remove Y-axis labels
+  axis.ticks.y = element_blank(),  # Remove Y-axis ticks
+  axis.title.x = element_text(color = "black", face = "bold", size = 18),
+  axis.text.x = element_text(colour = "black", face = "bold", size = 17),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  plot.title = element_text(size = 18, face = "bold")
+)
+
+legend_theme <- theme(
+  legend.position = "top",
+  legend.title = element_blank(),
+  legend.text = element_text(color = "black", size = 15)
+)
+
+# Generate individual plots
+plot_pearson <- ggplot(comparison_df, aes(x = DataFusion, y = Pearson_Change, fill = DataFusion)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = fusion_colors) +
+  scale_y_continuous(limits = c(-100, 180), breaks = seq(-100, 180, by = 40)) +
+  coord_flip() +
+  labs(title = "Pearson Correlation Change", x = "Data Fusion", y = "Change (%)") +
+  custom_theme_right  # Remove Y-axis from second column
+
+plot_spearman <- ggplot(comparison_df, aes(x = DataFusion, y = Spearman_Change, fill = DataFusion)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = fusion_colors) +
+  scale_y_continuous(limits = c(-30, 10), breaks = seq(-30, 10, by = 10)) +
+  coord_flip() +
+  labs(title = "Spearman Correlation Change", x = "Data Fusion", y = "Change (%)") +
+  custom_theme_left
+ 
+plot_rmse <- ggplot(comparison_df, aes(x = DataFusion, y = RMSE_Change, fill = DataFusion)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = fusion_colors) +
+  coord_flip() +
+  labs(title = "RMSE Change", x = "Data Fusion", y = "Change (%)") +
+  custom_theme_right
+
+plot_irm <- ggplot(comparison_df, aes(x = DataFusion, y = IRM_Change, fill = DataFusion)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = fusion_colors) +
+  scale_y_continuous(limits = c(0, 20), breaks = seq(0, 20, by = 10)) +
+  coord_flip() +
+  labs(title = "IRM Change", x = "Data Fusion", y = "Change (%)") +
+  custom_theme_left
+
+plot_mae <- ggplot(comparison_df, aes(x = DataFusion, y = MAE_Change, fill = DataFusion)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = fusion_colors) +
+  coord_flip() +
+  labs(title = "MAE Change", x = "Data Fusion", y = "Change (%)") +
+  custom_theme_left
+
+# Create a legend-only plot (completely blank except for the legend)
+legend_plot <- ggplot(comparison_df, aes(x = DataFusion, fill = DataFusion)) +
+  geom_bar(alpha = 10) +  # Make the bars invisible
+  scale_fill_manual(values = fusion_colors) +
+  labs(title = "") +
+  theme_void() +  # Remove all background, shafts and grid
+  theme(
+    legend.position = "top",
+    legend.text = element_text(size = 14),  # Increasing the size of the caption text
+    legend.key.size = unit(1, "cm")  # Increase the size of colored boxes in the legend
+  )
+
+# Arrange all plots into a single panel using gridExtra
+final_plot <- grid.arrange(
+  plot_spearman, plot_pearson,
+  plot_mae, plot_rmse,
+  plot_irm, legend_plot,  # Legend in the last slot
+  ncol = 2
+)
+
+# Save the updated figure
+
+ggsave("04_Figures/R/Fig2.tiff", plot = final_plot, width = 12, height = 14, dpi = 300)
+
+# Export comparison_df to Excel
+library(openxlsx)
+write.xlsx(comparison_df, "Comparison_DataFusion_10vs100Poses.xlsx")
+
+```
+
+# **How do Data Fusion methods behave across different proteins?**
+
+### Complete (Fig. 3A)
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(formattable)
+library(webshot)
+library(htmlwidgets)
+
+
+# -------------------------
+# Filter only IC50 data and limit to poses ≤ 10
+# -------------------------
+df_ic50 <- df %>%
+  filter(ExpVariable == "IC50", Pose <= 10)  # Filter Pose ≤ 10
+
+# -------------------------
+# Compute Summary Statistics per Data Fusion method (Spearman only)
+# -------------------------
+summary_df <- df_ic50 %>%
+  group_by(DataFusion) %>%
+  summarise(
+    N = n(),
+    Mean = mean(Spearman, na.rm = TRUE),
+    SD = sd(Spearman, na.rm = TRUE),
+    Q1 = quantile(Spearman, 0.25, na.rm = TRUE),
+    Median = median(Spearman, na.rm = TRUE),
+    Q3 = quantile(Spearman, 0.75, na.rm = TRUE),
+    # Count of outliers above Q3
+   "Outliers ≥ Q3" = sum(Spearman > quantile(Spearman, 0.75, na.rm = TRUE), na.rm = TRUE),
+    # Count of outliers above or equal to 0.9
+   "Outliers ≥ 0.9" = sum(Spearman >= 0.9, na.rm = TRUE),
+    # Count of outliers exactly equal to 1
+    "Outliers = 1.0" = sum(Spearman == 1, na.rm = TRUE)
+  ) %>%
+  arrange(desc(Mean))  # Sorting by highest Mean Spearman correlation
+
+
+# Ensure PhantomJS is installed for image export
+webshot::install_phantomjs()
+
+# ------------------------- 
+# Define Advanced Heatmap Gradient Function
+# -------------------------
+heatmap_gradient <- function(x) {
+  normalize <- (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+  colorRampPalette(c("white", "yellow", "orange", "red"))(100)[as.numeric(cut(normalize, breaks = 100))]
+}
+
+# Format summary_df to 3 decimal places
+summary_df <- summary_df %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+# -------------------------
+# Apply Heatmap Formatting to the Table
+# -------------------------
+formatted_table <- formattable(summary_df, list(
+  Mean = color_tile("white", "#FF3D3D"),
+  SD = color_tile("white", "#FF3D3D"),
+  Q1 = color_tile("white", "#FF3D3D"),
+  Median = color_tile("white", "#FF3D3D"),
+  Q3 = color_tile("white", "#FF3D3D"),
+  N = color_tile("white", "#FF3D3D"),
+  "Outliers ≥ Q3" = color_tile("white", "#FF3D3D"),
+  "Outliers ≥ 0.9" = color_tile("white", "#FF3D3D"),
+  "Outliers = 1.0" = color_tile("white", "#FF3D3D")
+))
+
+# -------------------------
+# Save the Table as an HTML File
+# -------------------------
+html_file <- "Fig3A.html"
+saveWidget(as.htmlwidget(formatted_table), file = html_file, selfcontained = TRUE)
+
+# -------------------------
+# Convert HTML to PNG (Ensure PhantomJS is installed)
+# -------------------------
+png_file <- "Fig3A.png"
+webshot(html_file, file = png_file, vwidth = 800, vheight = 200)  # Adjusted dimensions
+
+
+```
+
+### Per protein (Fig. 3B)
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(formattable)
+library(webshot)
+library(htmlwidgets)
+
+# Ensure PhantomJS is installed for image export
+webshot::install_phantomjs()
+
+# -------------------------
+# Filter only IC50 data and limit to poses ≤ 10
+# -------------------------
+df_ic50 <- df %>%
+  filter(ExpVariable == "IC50", Pose <= 10)  # Filter Pose ≤ 10
+
+# -------------------------
+# Compute Summary Statistics per Data Fusion method and Protein
+# -------------------------
+summary_df <- df_ic50 %>%
+  group_by(Protein, DataFusion) %>%
+  summarise(
+    N = n(),
+    Mean = mean(Spearman, na.rm = TRUE),
+    SD = sd(Spearman, na.rm = TRUE),
+    Q1 = quantile(Spearman, 0.25, na.rm = TRUE),
+    Median = median(Spearman, na.rm = TRUE),
+    Q3 = quantile(Spearman, 0.75, na.rm = TRUE),
+    
+    "Outliers ≥ Q3" = sum(Spearman > quantile(Spearman, 0.75, na.rm = TRUE), na.rm = TRUE),
+    "Outliers ≥ 0.9" = sum(Spearman >= 0.9, na.rm = TRUE),
+    "Outliers = 1.0" = sum(Spearman == 1, na.rm = TRUE)
+  ) %>%
+  arrange(Protein, DataFusion)  # Sorting by Protein first, then DataFusion
+
+# -------------------------
+# Round numeric values to 3 decimal places
+# -------------------------
+summary_df <- summary_df %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+
+# -------------------------
+# Define Advanced Heatmap Gradient Function
+# -------------------------
+heatmap_gradient <- function(x) {
+  normalize <- (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+  colorRampPalette(c("white", "yellow", "orange", "#FF6B6B"))(100)[as.numeric(cut(normalize, breaks = 100))]
+}
+
+# -------------------------
+# Apply Heatmap Formatting
+# -------------------------
+formatted_table <- formattable(summary_df, list(
+  Mean = color_tile("white", "#FF6B6B"),
+  SD = color_tile("white", "#FF6B6B"),
+  Q1 = color_tile("white", "#FF6B6B"),
+  Median = color_tile("white", "#FF6B6B"),
+  Q3 = color_tile("white", "#FF6B6B"),
+  N = color_tile("white", "#FF6B6B"),
+  "Outliers ≥ Q3" = color_tile("white", "#FF6B6B"),
+  "Outliers ≥ 0.9" = color_tile("white", "#FF6B6B"),
+  "Outliers = 1.0" = color_tile("white", "#FF6B6B")
+))
+
+# -------------------------
+# Save Table as an Image
+# -------------------------
+# Save as an HTML file first
+html_file <- "Fig3B.html"
+saveWidget(as.htmlwidget(formatted_table), file = html_file, selfcontained = TRUE)
+
+# Convert HTML to PNG
+png_file <- "Fig3B.png"
+#webshot(html_file, file = png_file, vwidth = 1800, vheight = 1000)
+webshot(html_file, file = png_file, vwidth = 800, vheight = 200)
+
+```
+
+# Pose aggregation and data fusion: identifying optimal strategies across proteins
+
+## Fig. 4A-D
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+
+# Define custom theme for consistency
+custom_theme <- theme(
+  legend.position = "top",
+  legend.key.size = unit(1.5, "cm"),
+  legend.title = element_text(size = 22, face = "bold"), # Adjust size as needed
+  legend.text = element_text(color = "black", size = 18),
+  axis.title = element_text(color = "black", face = "bold", size = 24),
+  axis.text.x = element_text(colour = "black", face = "bold", size = 20, angle = 20, hjust = 1),
+  axis.text.y = element_text(colour = "black", face = "bold", size = 20),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  strip.text = element_text(size = 18, face = "bold")
+)
+
+# Filter only IC50 data with Spearman > 0.25
+df_ic50 <- df %>%
+  filter(ExpVariable == "IC50",  Pose <= 100, Pose > -1, Spearman > 0 )
+
+# Summarize Spearman correlation per Data Fusion, Pose, and Protein
+heatmap_data <- df_ic50 %>%
+  group_by(Protein, DataFusion, Pose) %>%
+  summarise(Mean_Spearman = max(Spearman, na.rm = TRUE), .groups = "drop")
+
+# Generate the heatmap per Protein with Pose labels in intervals of 10
+heatmap_DF <- ggplot(heatmap_data, aes(y = factor(Pose), x = DataFusion, fill = Mean_Spearman)) +
+  geom_tile(color = "white") +  # Heatmap tiles with white border
+  scale_fill_gradient2(low = "#33608C", mid = "white", high = "#B81840", midpoint = 0.5, na.value = "black", limits = c(0, 1)) +
+  scale_y_discrete(breaks = seq(min(heatmap_data$Pose), max(heatmap_data$Pose), by = 9)) + # Show Poses in steps of 10
+  labs(title = "",
+       y = "Pose",
+       x = "Data Fusion Method",
+       fill = "Spearman correlation") +
+  theme_minimal() +
+  custom_theme +  # Apply custom theme
+  facet_wrap(~ Protein, scales = "fixed")  # Separate heatmap per protein
+
+heatmap_DF
+
+ggsave("04_Figures/R/Fig4AD.tiff", plot = heatmap_DF, width = 12, height = 14, dpi = 300)
+```
+
+#    
+
+## Fig. 4E-H
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+
+# Define custom theme for consistency
+custom_theme <- theme(
+  legend.position = "top",
+  legend.key.size = unit(1.5, "cm"),
+  legend.title = element_text(size = 22, face = "bold"), # Adjust size as needed
+  legend.text = element_text(color = "black", size = 18),
+  axis.title = element_text(color = "black", face = "bold", size = 24),
+  axis.text.x = element_text(colour = "black", face = "bold", size = 20, angle = 20, hjust = 1),
+  axis.text.y = element_text(colour = "black", face = "bold", size = 20),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  strip.text = element_text(size = 18, face = "bold")
+)
+
+# Filter only IC50 data with Spearman > 0.3
+df_ic50 <- df %>%  
+   filter(ExpVariable == "IC50",  Pose <= 100, Pose > -1, Spearman > 0 )
+
+# Summarize N per Data Fusion, Pose, and Protein
+heatmap_data <- df_ic50 %>%
+  group_by(Protein, DataFusion, Pose) %>%
+  summarise(N = n(), .groups = "drop")  # Count the number of values
+
+# Generate the heatmap per Protein
+heatmap_N <- ggplot(heatmap_data, aes(y = factor(Pose), x = DataFusion, fill = N)) +
+  geom_tile(color = "white") +  # Heatmap tiles with white border
+  scale_fill_gradient(low = "#FEFFD9", high = "#146C36", na.value = "black", limits = c(0, 400)) +  # Custom color scale for N
+  scale_y_discrete(breaks = seq(min(heatmap_data$Pose), max(heatmap_data$Pose), by = 9)) +  # Show Poses in steps of 10
+  labs(title = "",
+       y = "Pose",
+       x = "Data Fusion Method",
+       fill = "Number of data") +  # Adjust legend title
+  theme_minimal() +
+  custom_theme +  # Apply custom theme
+  facet_wrap(~ Protein, scales = "fixed")  # Separate heatmap per protein
+
+# Display plot
+heatmap_N
+
+# Save the figure
+ggsave("04_Figures/R/Fig4EH.tiff", plot = heatmap_N, width = 12, height = 14, dpi = 300)
+```
+
+# Energy Terms
+
+## Fig. 5
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+
+# Define custom theme for consistency
+custom_theme <- theme(
+  legend.position = "top",
+  legend.key.size = unit(1.5, "cm"),
+  legend.text = element_text(color = "black", size = 18),
+  legend.title = element_text(size = 18, face = "bold"),  # Increased legend title size
+  axis.title = element_text(color = "black", face = "bold", size = 18),
+  axis.text.x = element_text(colour = "black", face = "bold", size = 16, angle = 20, hjust = 1),
+  axis.text.y = element_text(colour = "black", face = "bold", size = 16),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  strip.text = element_text(size = 18, face = "bold")  # Increases Protein label size
+)
+
+# Filter only IC50 data
+df_ic50 <- df %>%  
+  filter(ExpVariable == "IC50", Pose < 10 )  
+
+# Summarize Spearman correlation per EnergyTerm, DataFusion, Variant, and Protein
+heatmap_data <- df_ic50 %>%
+  group_by(Protein, Variant, EnergyTerm, DataFusion) %>%
+  summarise(Mean_Spearman = max(Spearman, na.rm = TRUE), .groups = "drop")
+
+# Generate the heatmap faceted by Protein
+heatmap_plot <- ggplot(heatmap_data, aes(x = DataFusion, y = EnergyTerm, fill = Mean_Spearman)) +
+  geom_tile(color = "white") +  # Heatmap tiles with white border
+  scale_fill_gradient2(low = "#53A054", mid = "white", high = "#540046", midpoint = 0) +  
+  labs(title = "",  # No title for clean formatting
+       x = "Data Fusion Method",
+       y = "Energy Term",
+       fill = "Spearman correlation") +
+  theme_minimal() +
+  custom_theme +  # Apply custom theme
+  facet_wrap(~ Protein, scales = "fixed")  # Separate heatmap per Protein
+
+# Display the plot
+heatmap_plot
+
+# Save the heatmap as TIFF
+ggsave("04_Figures/R/Fig5.tiff", plot = heatmap_plot, width = 14, height = 12, dpi = 300)
+```
+
+# Methods comparison is VS: performance across metrics
+
+## Fig. 6
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(gridExtra)  # Alternative to patchwork for combining plots
+
+# Define custom theme for consistency
+custom_theme <- theme(
+  legend.position = "top",
+  legend.key.size = unit(1.5, "cm"),
+  legend.text = element_text(color = "black", size = 18),
+  legend.title = element_text(size = 18, face = "bold"),  # Increased legend title size
+  axis.title = element_text(color = "black", face = "bold", size = 18),
+  axis.text.x = element_text(colour = "black", face = "bold", size = 16, angle = 0, hjust = 1),
+  axis.text.y = element_text(colour = "black", face = "bold", size = 16),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  strip.text = element_text(size = 18, face = "bold")  # Increases Protein label size
+)
+
+# -------------------------
+# Filter Data (IC50, Consider Methods, DataFusion = Minimum)
+# -------------------------
+df_ic50 <- df %>%
+  filter(
+    ExpVariable == "IC50",
+    EnergyTerm %in% c("MMGBSABind_Coulomb", "docking.score"),  
+    Pose <= 19,  
+    DataFusion == "Minimum"  
+  )
+
+# -------------------------
+# Summarize Maximum Metrics per Protein and Method
+# -------------------------
+heatmap_data <- df_ic50 %>%
+  group_by(Protein, Method) %>%
+  summarise(
+    Spearman = max(Spearman, na.rm = TRUE),
+    Pearson = max(Pearson, na.rm = TRUE),
+    MAE = max(MAE, na.rm = TRUE),
+    RMSE = max(RMSE, na.rm = TRUE),
+    IRM = max(IRM, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# -------------------------
+# Function to Create Heatmaps
+# -------------------------
+generate_heatmap <- function(df, metric, title, low_color, mid_color, high_color, limits) {
+  ggplot(df, aes(x = factor(Method), y = Protein, fill = .data[[metric]])) +
+    geom_tile(color = "white", na.rm = FALSE) +  # Ensure missing data appears white
+    scale_fill_gradient2(
+      low = low_color, mid = mid_color, high = high_color, 
+      midpoint = median(limits), limits = limits, na.value = "white"
+    ) +   
+    labs(title = "", x = "Method", y = "Protein", fill = title) +  # Removed "Max_"
+    theme_minimal() +
+    custom_theme
+}
+
+# -------------------------
+# Generate Individual Heatmaps
+# -------------------------
+plot_spearman <- generate_heatmap(heatmap_data, "Spearman", "Spearman Correlation", "#F8F9FF", "#839FCC", "#0E3F5C", c(0,1))
+plot_pearson  <- generate_heatmap(heatmap_data, "Pearson", "Pearson Correlation", "#F9F9F9", "#B3ABE8", "#312271", c(0,1))
+plot_mae      <- generate_heatmap(heatmap_data, "MAE", "MAE", "#F9F7EA", "#B3CD9D", "#006E37", range(heatmap_data$MAE, na.rm = TRUE))
+plot_rmse     <- generate_heatmap(heatmap_data, "RMSE", "RMSE", "#FADDC3", "#F69E71", "#EA4C3B", range(heatmap_data$RMSE, na.rm = TRUE))
+plot_irm      <- generate_heatmap(heatmap_data, "IRM", "IRM", "#F8DCD9", "#C46EAD", "#583C88", range(heatmap_data$IRM, na.rm = TRUE))
+
+# -------------------------
+# Arrange Plots Using gridExtra
+# -------------------------
+final_plot <- grid.arrange(plot_spearman, plot_pearson, plot_mae, plot_rmse, plot_irm, ncol = 2, nrow = 3)
+
+# -------------------------
+# Save the Final Figure
+# -------------------------
+ggsave("04_Figures/R/Fig6.tiff", plot = final_plot, width = 18, height = 16, dpi = 300)
+```
+
+# **Impact of protocol variants on VS performance**
+
+## Fig. S2
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(gridExtra)  # Alternative to patchwork for combining plots
+
+# Define custom theme for consistency
+custom_theme <- theme(
+  legend.position = "top",
+  legend.key.size = unit(1.5, "cm"),
+  legend.text = element_text(color = "black", size = 18),
+  legend.title = element_text(size = 18, face = "bold"),  # Increased legend title size
+  axis.title = element_text(color = "black", face = "bold", size = 18),
+  axis.text.x = element_text(colour = "black", face = "bold", size = 16, angle = 0, hjust = 1),
+  axis.text.y = element_text(colour = "black", face = "bold", size = 16),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  strip.text = element_text(size = 18, face = "bold")  # Increases Protein label size
+)
+
+# -------------------------
+# Filter Data (IC50, Consider Variants 1-5, DataFusion = Minimum)
+# -------------------------
+df_ic50 <- df %>%
+  filter(
+    ExpVariable == "IC50",
+    EnergyTerm %in% c("MMGBSABind_Coulomb", "docking.score"),  
+    Pose <= 19,  
+    DataFusion == "Minimum"
+  )
+
+# -------------------------
+# Summarize Maximum Metrics per Protein and Variant
+# -------------------------
+heatmap_data <- df_ic50 %>%
+  group_by(Protein, Variant) %>%
+  summarise(
+    Spearman = max(Spearman, na.rm = TRUE),
+    Pearson = max(Pearson, na.rm = TRUE),
+    MAE = max(MAE, na.rm = TRUE),
+    RMSE = max(RMSE, na.rm = TRUE),
+    IRM = max(IRM, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# -------------------------
+# Function to Create Heatmaps
+# -------------------------
+generate_heatmap <- function(df, metric, title, low_color, mid_color, high_color, limits) {
+  ggplot(df, aes(x = factor(Variant), y = Protein, fill = .data[[metric]])) +
+    geom_tile(color = "white", na.rm = FALSE) +  # Ensure missing data appears white
+    scale_fill_gradient2(
+      low = low_color, mid = mid_color, high = high_color, 
+      midpoint = median(limits), limits = limits, na.value = "white"
+    ) +   
+    labs(title = "", x = "Variant", y = "Protein", fill = title) +  # Removed "Max_"
+    theme_minimal() +
+    custom_theme
+}
+
+# -------------------------
+# Generate Individual Heatmaps
+# -------------------------
+plot_spearman <- generate_heatmap(heatmap_data, "Spearman", "Spearman Correlation", "#F8F9FF", "#839FCC", "#0E3F5C", c(0,1))
+plot_pearson  <- generate_heatmap(heatmap_data, "Pearson", "Pearson Correlation", "#F9F9F9", "#B3ABE8", "#312271", c(0,1))
+plot_mae      <- generate_heatmap(heatmap_data, "MAE", "MAE", "#F9F7EA", "#B3CD9D", "#006E37", range(heatmap_data$MAE, na.rm = TRUE))
+plot_rmse     <- generate_heatmap(heatmap_data, "RMSE", "RMSE", "#FADDC3", "#F69E71", "#EA4C3B", range(heatmap_data$RMSE, na.rm = TRUE))
+plot_irm      <- generate_heatmap(heatmap_data, "IRM", "IRM", "#F8DCD9", "#C46EAD", "#583C88", range(heatmap_data$IRM, na.rm = TRUE))
+
+# -------------------------
+# Arrange Plots Using gridExtra
+# -------------------------
+final_plot <- grid.arrange(plot_spearman, plot_pearson, plot_mae, plot_rmse, plot_irm, ncol = 2, nrow = 3)
+
+# -------------------------
+# Save the Final Figure
+# -------------------------
+ggsave("04_Figures/R/FigS2.tiff", plot = final_plot, width = 18, height = 16, dpi = 300)
+```
+
+# **Frame dependence across variants 3, 4, and 5**
+
+## Fig. S3
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+# Define custom theme for consistency
+custom_theme <- theme(
+  legend.position = "top",
+  legend.key.size = unit(1.5, "cm"),
+  legend.text = element_text(color = "black", size = 18),
+  legend.title = element_text(size = 18, face = "bold"),  # Increased legend title size
+  axis.title = element_text(color = "black", face = "bold", size = 18),
+  axis.text.x = element_text(colour = "black", face = "bold", size = 16, angle = 0, hjust = 1),
+  axis.text.y = element_text(colour = "black", face = "bold", size = 7),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  strip.text = element_text(size = 18, face = "bold")  # Increases Protein label size
+)
+
+# -------------------------
+# Filter Data (IC50, Exclude Variants 1 & 2)
+# -------------------------
+df_ic50 <- df %>%
+  filter(ExpVariable == "IC50", 
+         !Variant %in% c(1, 2), 
+         EnergyTerm %in% c("MMGBSABind_Coulomb", "docking.score"))
+
+# -------------------------
+# Process Frame Column (Ensure Global Ordering)
+# -------------------------
+df_ic50 <- df_ic50 %>%
+  mutate(
+    # Extract numerical part from Frame (if exists), keep NA otherwise
+    Frame_Num = as.numeric(str_extract(Frame, "\\d+")),
+    
+    # Assign ordering: 0 first, "All_Frames" second, then numerical order
+    Frame_Order = case_when(
+      Frame == "0" ~ -2,           # Assign lowest order to "0"
+      Frame == "All_Frames" ~ -1,  # Assign second lowest order to "All_Frames"
+      TRUE ~ Frame_Num             # Otherwise, use extracted numerical value
+    )
+  )
+
+# -------------------------
+# Define Global Frame Order
+# -------------------------
+global_frame_levels <- df_ic50 %>%
+  arrange(Frame_Order) %>%
+  distinct(Frame) %>%
+  pull(Frame)  # Extract ordered unique Frame values
+
+# Apply the global frame order across all proteins
+df_ic50 <- df_ic50 %>%
+  arrange(Protein, Frame_Order) %>%
+  mutate(Frame = factor(Frame, levels = global_frame_levels)) %>%
+  select(-Frame_Num, -Frame_Order)  # Remove helper columns
+
+# -------------------------
+# Summarize Spearman Correlation per Frame, Variant, and Protein
+# -------------------------
+heatmap_data <- df_ic50 %>%
+  group_by(Protein, Frame, Variant) %>%
+  summarise(Mean_Spearman = max(Spearman, na.rm = TRUE), .groups = "drop")
+
+# -------------------------
+# Ensure Specific Frames Exist for Variant 4 in 6QSU
+# -------------------------
+excluded_frames <- c("frame1000", "frame978", "frame901", "frame861", "frame801")
+
+missing_rows <- expand.grid(
+  Protein = "6QSU",
+  Frame = excluded_frames,
+  Variant = 4,
+  Mean_Spearman = NA
+)
+
+heatmap_data <- bind_rows(heatmap_data, missing_rows)  # Add missing frames
+
+# -------------------------
+# Generate Heatmap Faceted by Protein (Fix Frame Ordering)
+# -------------------------
+heatmap_plot <- ggplot(heatmap_data, aes(x = Variant, y = Frame, fill = Mean_Spearman)) +
+  geom_tile(color = "grey80", na.rm = FALSE) +  # Keep grid visible with grey lines
+  scale_fill_gradient2(low = "#4F53B7", mid = "yellow", high = "#005600", midpoint = 0, 
+                       na.value = "white", limits = c(-1, 1)) +  # Force legend limits from -1 to 1
+  labs(title = "",
+       x = "Variant",
+       y = "Frames",
+       fill = "Spearman correlation") +
+  theme_minimal() +
+  custom_theme +
+  facet_wrap(~ Protein, scales = "free_y")  # Allow different Frame scales per Protein
+
+# Display the plot
+heatmap_plot
+
+# -------------------------
+# Save Heatmap as TIFF
+# -------------------------
+ggsave("04_Figures/R/FigS3.tiff", plot = heatmap_plot, width = 14, height = 12, dpi = 300)
+```
+
+# **Comparison of IC₅₀ and pIC₅₀ as experimental parameters for correlation analysis**
+
+## Fig. S4
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(gridExtra)  # For combining multiple plots
+
+# -------------------------
+# Define Custom Theme for Consistency
+# -------------------------
+custom_theme <- theme(
+  legend.position = "top",
+  legend.key.size = unit(1.5, "cm"),
+  legend.text = element_text(color = "black", size = 18),
+  legend.title = element_text(size = 20, face = "bold"),
+  axis.title = element_text(color = "black", face = "bold", size = 18),
+  axis.text.x = element_text(colour = "black", face = "bold", size = 16, angle = 0, hjust = 1),
+  axis.text.y = element_text(colour = "black", face = "bold", size = 16),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  strip.text = element_text(size = 22, face = "bold", vjust = 1)  # Bigger titles, closer to plots
+)
+
+# -------------------------
+# Filter Data (IC50 and pIC50)
+# -------------------------
+df_comparison <- df %>%
+  filter(ExpVariable %in% c("IC50", "pIC50"),
+         EnergyTerm %in% c("MMGBSABind_Coulomb"),
+         Pose <= 19)
+
+# -------------------------
+# Summarize Spearman and Pearson Correlation per Protein and ExpVariable
+# -------------------------
+correlation_data <- df_comparison %>%
+  group_by(Protein, DataFusion, ExpVariable) %>%
+  summarise(
+    Spearman = median(Spearman, na.rm = TRUE),
+    Pearson = median(Pearson, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(names_from = ExpVariable, values_from = c(Spearman, Pearson)) %>%
+  mutate(
+    Spearman = (abs(Spearman_IC50) - abs(Spearman_pIC50)),  
+    Pearson  = (abs(Pearson_IC50) - abs(Pearson_pIC50))     
+  )
+
+# -------------------------
+# Reshape for Visualization
+# -------------------------
+heatmap_data <- correlation_data %>%
+  select(Protein, DataFusion, Spearman, Pearson) %>%
+  pivot_longer(cols = c(Spearman, Pearson), names_to = "Correlation Type", values_to = "Diff")
+
+# -------------------------
+# Function to Generate Heatmaps Per Protein
+# -------------------------
+generate_heatmap <- function(protein_name, df) {
+  ggplot(df, aes(x = `Correlation Type`, y = DataFusion, fill = Diff)) +
+    geom_tile(color = "white", na.rm = FALSE) +  
+    scale_fill_gradientn(
+      colors = c("#9E3D22", "#EF8737", "#B0DEA5", "#699CC5", "#2B5C8A"),
+      values = scales::rescale(c(-0.3, -0.15, 0, 0.15, 0.3)),
+      limits = c(-0.3, 0.3),
+      na.value = "white",
+      guide = guide_colorbar(
+        barwidth = 15, barheight = 1.8, title.position = "top", title.hjust = 0.5,
+        label.theme = element_text(size = 16, face = "bold"),
+        title.theme = element_text(size = 20, face = "bold"),
+        frame.colour = "black"
+      )
+    ) +
+    labs(
+      title = protein_name,  # Direct title
+      x = "",
+      y = "Data Fusion Method",
+      fill = "Difference"
+    ) +
+    theme_minimal() +
+    custom_theme +
+    theme(
+      plot.title = element_text(size = 24, face = "bold", hjust = 0.5, vjust = 0.2),  # Bigger title, closer
+      legend.text = element_text(size = 16, face = "bold"),
+      legend.title = element_text(size = 18, face = "bold")
+    )
+}
+
+# -------------------------
+# Generate Heatmaps for Each Protein
+# -------------------------
+protein_list <- unique(heatmap_data$Protein)
+
+plots <- lapply(protein_list, function(protein) {
+  generate_heatmap(protein, heatmap_data %>% filter(Protein == protein))
+})
+
+# -------------------------
+# Arrange All Heatmaps in a Single Figure
+# -------------------------
+final_plot <- grid.arrange(grobs = plots, ncol = 2, nrow = 2)
+
+# -------------------------
+# Save the Final Figure
+# -------------------------
+ggsave("04_Figures/R/FigS4.tiff", plot = final_plot, width = 16, height = 12, dpi = 300)
+
+# Display final plot
+print(final_plot)
+
+```
+
+# Frequency Analysis of high-correlation parameter combinations in VS
+
+## Table S2
+
+```{r}
+
+library(dplyr)
+
+# -------------------------
+# Step 2: Filter Data for High Spearman Correlations
+# -------------------------
+df_high_spearman <- df %>%
+  filter(Spearman >= 0.75, ExpVariable == "IC50") %>%
+  select( DataFusion, EnergyTerm, Method, Variant, Spearman, Pearson, MAE, RMSE)  # Keep Spearman for averaging
+
+# -------------------------
+# Step 3: Count Frequent Combinations and Compute Average Spearman
+# -------------------------
+frequent_combinations <- df_high_spearman %>%
+  group_by(DataFusion, EnergyTerm, Method, Variant) %>%
+  summarise(
+    Frequency = n(),  # Count occurrences
+    "Avg. Spearman" = mean(Spearman, na.rm = TRUE),  # Compute average Spearman
+    "Avg. Pearson" = mean(Pearson, na.rm = TRUE),
+    "Avg. MAE" = mean(MAE, na.rm = TRUE),
+    "Avg. RMSE" = mean(RMSE, na.rm = TRUE),
+    #Avg_IRM = mean(IRM, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(Frequency))
+
+
+
+
+frequent_combinations2 <- frequent_combinations %>%
+  filter(Frequency >= 50)
+
+# -------------------------
+# Step 4: Display Data
+# -------------------------
+print(frequent_combinations2)
+```
+
+## Sankey (optional)
+
+```{r}
+
+library(networkD3)
+library(dplyr)
+library(tidyr)
+
+# -------------------------
+# Step 1: Filter Frequent Combinations for Sankey
+# -------------------------
+df_sankey <- frequent_combinations2 %>%
+  mutate(Variant = as.character(Variant)) %>%  # Convert Variant to character
+  select(DataFusion, EnergyTerm, Method, Variant, Frequency) %>%
+  pivot_longer(cols = c(DataFusion, EnergyTerm, Method, Variant), names_to = "source", values_to = "target")
+
+# -------------------------
+# Step 2: Count Occurrences
+# -------------------------
+df_sankey_count <- df_sankey %>%
+  group_by(source, target) %>%
+  summarise(n = sum(Frequency), .groups = "drop") %>%
+  arrange(desc(n))
+
+# -------------------------
+# Step 3: Convert Nodes to Index Format
+# -------------------------
+nodes <- data.frame(name = unique(c(df_sankey_count$source, df_sankey_count$target)))
+
+# -------------------------
+# Step 4: Assign Group Colors to Nodes
+# -------------------------
+nodes$group <- case_when(
+  nodes$name %in% df_sankey$source[df_sankey$source == "Method"] ~ "Method",
+  nodes$name %in% df_sankey$source[df_sankey$source == "EnergyTerm"] ~ "EnergyTerm",
+  nodes$name %in% df_sankey$source[df_sankey$source == "DataFusion"] ~ "DataFusion",
+  nodes$name %in% df_sankey$source[df_sankey$source == "Variant"] ~ "Variant",
+  TRUE ~ "Inherited"  # Default category for targets
+)
+
+# -------------------------
+# Step 5: Define Custom Colors for Source-Target Mapping
+# -------------------------
+color_scale <- 'd3.scaleOrdinal()
+  .domain(["Method", "EnergyTerm", "DataFusion", "Variant", "Inherited"])
+  .range(["#D73027", "#4575B4", "#1A9850", "#F46D43", "#999999"])'  # Targets inherit faded colors
+
+# -------------------------
+# Step 6: Convert Source and Target to Numeric Indexes
+# -------------------------
+df_sankey_count$source <- match(df_sankey_count$source, nodes$name) - 1
+df_sankey_count$target <- match(df_sankey_count$target, nodes$name) - 1
+
+# -------------------------
+# Step 7: Generate Sankey Diagram with Color Control
+# -------------------------
+sankey <- sankeyNetwork(
+  Links = df_sankey_count, Nodes = nodes,
+  Source = "source", Target = "target",
+  Value = "n", NodeID = "name",
+  fontSize = 14, nodeWidth = 30,
+  NodeGroup = "group",  # Assign colors based on group
+  colourScale = JS(color_scale),  # Apply color scale
+  sinksRight = FALSE  # Ensure target nodes get color
+)
+
+# -------------------------
+# Step 8: Display Sankey Diagram
+# -------------------------
+sankey
+```

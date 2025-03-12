@@ -1,0 +1,2664 @@
+---
+title: "Comparative Data Analysis of Virtual Screening
+Methodologies for Predicting Urease Inhibitory Activity"
+output: html_notebook
+---
+
+## **Data Fusion Methods**
+
+```{r}
+# Load necessary library
+library(dplyr)
+
+# Function to calculate Median
+median_value <- function(data, energy_col) {
+  data %>%
+    group_by(Title) %>%
+    summarise(!!energy_col := median(.data[[energy_col]], na.rm = TRUE), .groups = "drop")
+}
+
+# Function to calculate Minimum Value (now considering pose)
+minimum_value <- function(data, energy_col, pose) {
+  data %>%
+    filter(Poses == pose) %>%  
+    select(Title, !!energy_col)  
+}
+
+# Function to calculate Arithmetic Mean
+arithmetic_mean <- function(data, energy_col) {
+  data %>%
+    group_by(Title) %>%
+    summarise(!!energy_col := mean(.data[[energy_col]], na.rm = TRUE), .groups = "drop")
+}
+
+# Function to calculate Geometric Mean
+geometric_mean <- function(data, energy_col) {
+ data %>%
+   group_by(Title) %>%
+   summarise(!!energy_col := sign(mean(.data[[energy_col]], na.rm = TRUE)) *
+               exp(mean(log(abs(.data[[energy_col]])), na.rm = TRUE)), .groups = "drop")
+}
+
+# Function to calculate Harmonic Mean
+harmonic_mean <- function(data, energy_col) {
+  data %>%
+    group_by(Title) %>%
+    summarise(!!energy_col := sign(mean(.data[[energy_col]], na.rm = TRUE)) * 
+                (n() / sum(1 / abs(.data[[energy_col]]), na.rm = TRUE)), .groups = "drop")
+}
+
+# Function to calculate Euclidean Mean
+euclidean_mean <- function(data, energy_col) {
+  data %>%
+    group_by(Title) %>%
+    summarise(
+      !!energy_col := sign(mean(.data[[energy_col]], na.rm = TRUE)) * 
+                      sqrt(sum((.data[[energy_col]])^2, na.rm = TRUE) / n()), 
+      .groups = "drop"
+    )
+}
+```
+
+# **Variant 1 - 1 (Docking)**
+
+Need modify:
+
+-   Modify `data_path` from **Load data**:
+
+-   Modify `energy_columns` [docking or MM-GBSA terms] from **Correlation Data Analysis**
+
+-   Modify `output_filename` from **Correlation Data Analysis**
+
+-   Modify `Variant` and `Method` from **Correlation Data Analysis**
+
+### **Load data**
+
+Load data automatically from the data_path
+
+```{r}
+# Load required libraries
+library(openxlsx)
+library(dplyr)
+library(stringr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the directory containing the Excel files
+data_path <- "02_Data_Variants/Data_Variant_1_1_Docking/"
+
+# List all .xlsx files in the directory
+file_list <- list.files(path = data_path, pattern = "*.xlsx", full.names = TRUE)
+
+# Extract protein names from filenames (Assumes filenames are formatted as: combined_data_Protein.xlsx)
+protein_names <- str_extract(basename(file_list), "(?<=combined_data_)[^\\.]+") 
+
+# -------------------------
+# Load Data
+# -------------------------
+
+# Read each Excel file into a list of data frames
+data_list <- lapply(seq_along(file_list), function(i) {
+  file <- file_list[i]
+  protein <- protein_names[i]
+  
+  # Read file if it exists
+  if (file.exists(file)) {
+    df <- read.xlsx(file, sheet = 1)
+    
+    # Remove pIC50.Exp if it exists
+    if ("pIC50.Exp" %in% colnames(df)) {
+      df <- df %>% select(-pIC50.Exp)
+    }
+    
+    # Remove pIC50 if it exists
+    if ("pIC50" %in% colnames(df)) {
+      df <- df %>% select(-pIC50)
+    }
+    
+    # Calculate pIC50 from IC50 (IC50 is in µM, needs to be converted to M)
+    df <- df %>% mutate(pIC50 = -log10(IC50 * 1e-6))
+    
+    # Add protein name as a new column
+    df <- df %>% mutate(Protein = protein)
+    
+    return(df)
+  } else {
+    warning(paste("File not found:", file))
+    return(NULL)
+  }
+})
+
+# Assign names to the list for easier reference
+names(data_list) <- protein_names
+
+# -------------------------
+# Filter Data
+# -------------------------
+
+# Function to filter data
+filter_data <- function(df) {
+  df %>% 
+    filter(IC50 != 800 & !is.na(IC50) & pIC50 != 3.09 & !is.na(pIC50))
+}
+
+# Apply filtering to each dataset
+filtered_data_list <- lapply(data_list, function(df) {
+  if (!is.null(df)) {
+    filter_data(df)
+  } else {
+    NULL
+  }
+})
+
+# -------------------------
+# Summary of Removed Values
+# -------------------------
+
+# Count missing values and occurrences of 800 in IC50 and 3.09 in pIC50 before filtering
+missing_summary <- data.frame(
+  Protein = protein_names,
+  Missing_IC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$IC50)) else NA),
+  IC50_800 = sapply(data_list, function(df) if (!is.null(df)) sum(df$IC50 == 800, na.rm = TRUE) else NA),
+  Missing_pIC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$pIC50)) else NA),
+  pIC50_309 = sapply(data_list, function(df) if (!is.null(df)) sum(df$pIC50 == 3.09, na.rm = TRUE) else NA)
+)
+
+# Display the summary of removed values
+print(missing_summary)
+
+# The `filtered_data_list` now contains cleaned datasets for each protein.
+
+```
+
+### **Verify the number of compounds**
+
+Prints the number of unique compounds for each file
+
+```{r}
+# Function to count unique compounds (Title)
+count_unique_titles <- function(df) {
+  if (!is.null(df)) {
+    return(length(unique(df$Title)))
+  } else {
+    return(NA)
+  }
+}
+
+# Apply function to each dataset in the list
+unique_counts <- sapply(filtered_data_list, count_unique_titles)
+
+# Display the results
+print(unique_counts)
+
+```
+
+### Correlation Data Analysis
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(openxlsx)  # Required for Excel export
+
+# -------------------------
+# Define IRM Function
+# -------------------------
+
+# IRM: Inlier Ratio Metric 
+calculate_irm <- function(actual, predicted, threshold = 1.0) {
+  mean(abs(actual - predicted) <= threshold, na.rm = TRUE)  
+}
+
+# -------------------------
+# Define the Data Fusion Methods
+# -------------------------
+
+apply_data_fusion <- function(data, method, energy_col, pose = NULL) {
+  if (method == "Median") {
+    return(median_value(data, energy_col))
+  } else if (method == "Minimum") {
+    return(minimum_value(data, energy_col, pose))  
+  } else if (method == "Arithmetic") {
+    return(arithmetic_mean(data, energy_col))
+  } else if (method == "Geometric") {
+    return(geometric_mean(data, energy_col))
+  } else if (method == "Harmonic") {
+    return(harmonic_mean(data, energy_col))
+  } else if (method == "Euclidean") {
+    return(euclidean_mean(data, energy_col))
+  } else {
+    stop("Invalid Data Fusion Method")
+  }
+}
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the output filename
+output_filename <- "Correlation_Variant_1_1_Docking.xlsx"
+
+# Define the variant and method
+Variant <- "1_1"
+Method <- "Docking"
+
+# Define the energy-related columns to be analyzed
+energy_columns <- c("docking.score", "glide.ligand.efficiency", 
+                    "glide.gscore", "glide.emodel", "glide.energy", 
+                    "glide.einternal")
+
+# Define experimental variables to compare (IC50 and pIC50)
+exp_variables <- c("IC50", "pIC50")
+
+# -------------------------
+# Create a dataframe to store the results
+# -------------------------
+
+results_df <- data.frame(Protein = character(),
+                         ExpVariable = character(),
+                         DataFusion = character(),
+                         EnergyTerm = character(),
+                         Pose = integer(),
+                         Pearson = numeric(),
+                         Spearman = numeric(),
+                         MAE = numeric(),
+                         RMSE = numeric(),
+                         IRM = numeric(),  # Nueva columna para IRM
+                         N = integer(),
+                         Variant = character(),
+                         Method = character(),
+                         stringsAsFactors = FALSE)
+
+# Define the list of Data Fusion Methods to apply
+fusion_methods <- c("Median", "Minimum", "Arithmetic", "Geometric", "Harmonic", "Euclidean")
+
+# -------------------------
+# Iterate over each protein dataset in `filtered_data_list`
+# -------------------------
+
+for (protein_name in names(filtered_data_list)) {
+  data_protein <- filtered_data_list[[protein_name]]
+
+  for (fusion_method in fusion_methods) {
+    
+    start_pose <- ifelse(fusion_method == "Minimum", 1, 2)
+
+    for (i in start_pose:10) {
+      
+      # Filtrar los datos por poses
+      filtered_data <- data_protein %>%
+        filter(Poses <= i)  
+
+      for (energy_col in energy_columns) {
+        
+        # Aplicar la técnica de Data Fusion
+        if (fusion_method == "Minimum") {
+          fused_data <- apply_data_fusion(filtered_data, fusion_method, energy_col, pose = i)  
+        } else {
+          fused_data <- apply_data_fusion(filtered_data, fusion_method, energy_col)
+        }
+        
+        # Detectar el nombre correcto de la columna fusionada
+        fusion_col_name <- colnames(fused_data)[which(colnames(fused_data) != "Title")]
+
+        # Merge con datos experimentales
+        merged_data <- left_join(fused_data, data_protein[, c("Title", exp_variables)], by = "Title")
+        
+        # Iterar sobre IC50 y pIC50
+        for (exp_variable in exp_variables) {
+          
+          # Filtrar valores no nulos para cálculos
+          valid_data <- merged_data %>%
+            filter(!is.na(.data[[exp_variable]]) & !is.na(.data[[fusion_col_name]]))
+
+          n_used <- nrow(valid_data)
+          
+          if (n_used < 3) {
+            pose_df <- data.frame(
+              Protein = protein_name,  
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = NA,
+              Spearman = NA,
+              MAE = NA,
+              RMSE = NA,
+              IRM = NA,  
+              N = n_used,
+              Variant = Variant,  
+              Method = Method,  
+              stringsAsFactors = FALSE
+            )
+            
+          } else {
+            # Cálculo de correlaciones y métricas
+            cor_pearson <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs")
+            cor_spearman <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs", method = "spearman")
+            mae_value <- mean(abs(valid_data[[exp_variable]] - valid_data[[fusion_col_name]]), na.rm = TRUE)
+            rmse_value <- sqrt(mean((valid_data[[exp_variable]] - valid_data[[fusion_col_name]])^2, na.rm = TRUE))
+            irm_value <- calculate_irm(valid_data[[exp_variable]], valid_data[[fusion_col_name]])  # Nuevo cálculo de IRM
+            
+            # Save results to the data frame
+            pose_df <- data.frame(
+              Protein = protein_name,  
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = round(cor_pearson, 3),
+              Spearman = round(cor_spearman, 3),
+              MAE = round(mae_value, 3),
+              RMSE = round(rmse_value, 3),
+              IRM = round(irm_value, 3),  # Agregamos IRM
+              N = n_used,
+              Variant = Variant,  
+              Method = Method,  
+              stringsAsFactors = FALSE
+            )
+          }
+          
+          # Add results to the final dataframe
+          results_df <- bind_rows(results_df, pose_df)
+          
+        }  # End iteration on IC50 and pIC50
+      }  # End iteration on energy terms
+    }  # End iteration over poses
+  }  # End iteration on fusion methods
+}  # End iteration on proteins
+
+# Save results in Excel
+write.xlsx(results_df, output_filename)
+
+#Success message
+cat("Data successfully saved to", output_filename, "\n")
+
+```
+
+# **Variant 1 - 2 (QPLD):**
+
+### **Load data**
+
+-   Modify `data_path` from **Load data**:
+
+```{r}
+
+# Load required libraries
+library(openxlsx)
+library(dplyr)
+library(stringr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the directory containing the Excel files
+data_path <- "/media/daniel/DATA2TB/DROP/Dropbox/UCM/Fondecyt_Iniciacion_2022/Aprovado/Etapas/Paper1/Paper_Hp/Analysis/Data_Variant_1_2_QPLD/"
+
+# List all .xlsx files in the directory
+file_list <- list.files(path = data_path, pattern = "*.xlsx", full.names = TRUE)
+
+# Extract protein names from filenames (Assumes filenames are formatted as: combined_data_Protein.xlsx)
+protein_names <- str_extract(basename(file_list), "(?<=combined_data_)[^\\.]+")
+
+# -------------------------
+# Load Data
+# -------------------------
+
+# Read each Excel file into a list of data frames
+data_list <- lapply(seq_along(file_list), function(i) {
+  file <- file_list[i]
+  protein <- protein_names[i]
+  
+  # Read file if it exists
+  if (file.exists(file)) {
+    df <- read.xlsx(file, sheet = 1)
+    
+    # Remove pIC50.Exp if it exists
+    if ("pIC50.Exp" %in% colnames(df)) {
+      df <- df %>% select(-pIC50.Exp)
+    }
+    
+    # Remove pIC50 if it exists
+    if ("pIC50" %in% colnames(df)) {
+      df <- df %>% select(-pIC50)
+    }
+    
+    # Remove last "_X" from Title
+    df <- df %>% mutate(Title = str_replace(Title, "_\\d+$", ""))
+    
+    # Calculate pIC50 from IC50 (IC50 is in µM, needs to be converted to M)
+    df <- df %>% mutate(pIC50 = -log10(IC50 * 1e-6))
+    
+    # Add protein name as a new column
+    df <- df %>% mutate(Protein = protein)
+    
+    return(df)
+  } else {
+    warning(paste("File not found:", file))
+    return(NULL)
+  }
+})
+
+# Assign names to the list for easier reference
+names(data_list) <- protein_names
+
+# -------------------------
+# Filter Data
+# -------------------------
+
+# Function to filter data
+filter_data <- function(df) {
+  df %>% 
+    filter(IC50 != 800 & !is.na(IC50) & pIC50 != 3.09 & !is.na(pIC50))
+}
+
+# Apply filtering to each dataset
+filtered_data_list <- lapply(data_list, function(df) {
+  if (!is.null(df)) {
+    filter_data(df)
+  } else {
+    NULL
+  }
+})
+
+# -------------------------
+# Summary of Removed Values
+# -------------------------
+
+# Count missing values and occurrences of 800 in IC50 and 3.09 in pIC50 before filtering
+missing_summary <- data.frame(
+  Protein = protein_names,
+  Missing_IC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$IC50)) else NA),
+  IC50_800 = sapply(data_list, function(df) if (!is.null(df)) sum(df$IC50 == 800, na.rm = TRUE) else NA),
+  Missing_pIC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$pIC50)) else NA),
+  pIC50_309 = sapply(data_list, function(df) if (!is.null(df)) sum(df$pIC50 == 3.09, na.rm = TRUE) else NA)
+)
+
+# Display the summary of removed values
+print(missing_summary)
+
+# The `filtered_data_list` now contains cleaned datasets for each protein.
+
+```
+
+### **Verify the number of compounds**
+
+Prints the number of unique compounds for each file
+
+```{r}
+# Function to count unique compounds (Title)
+count_unique_titles <- function(df) {
+  if (!is.null(df)) {
+    return(length(unique(df$Title)))
+  } else {
+    return(NA)
+  }
+}
+
+# Apply function to each dataset in the list
+unique_counts <- sapply(filtered_data_list, count_unique_titles)
+
+# Display the results
+print(unique_counts)
+```
+
+### Correlation Data Analysis (up-to 100 poses)
+
+-   Modify `energy_columns` [docking or MM-GBSA terms] from **Correlation Data Analysis**
+
+-   Modify `output_filename` from **Correlation Data Analysis**
+
+-   Modify `Variant` and `Method` from **Correlation Data Analysis**
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(openxlsx)  # Required for Excel export
+library(stringr)   # For regex operations
+
+# -------------------------
+# Define IRM Function
+# -------------------------
+
+# IRM: Inlier Ratio Metric - Proporción de predicciones dentro del umbral de error
+calculate_irm <- function(actual, predicted, threshold = 1.0) {
+  mean(abs(actual - predicted) <= threshold, na.rm = TRUE)  
+}
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the output filename
+output_filename <- "Correlation_Variant_1_2_QPLD_100poses.xlsx"
+
+# Define the variant and method
+Variant <- "1_2"
+Method <- "QPLD"
+
+# Define the energy-related columns to be analyzed
+energy_columns <- c("docking.score", "glide.ligand.efficiency", 
+                    "glide.gscore", "glide.emodel", "glide.energy", 
+                    "glide.einternal")
+
+# Define experimental variables to compare (IC50 and pIC50)
+exp_variables <- c("IC50", "pIC50")
+
+# Create a dataframe to store the results
+results_df <- data.frame(Protein = character(),
+                         ExpVariable = character(),
+                         DataFusion = character(),
+                         EnergyTerm = character(),
+                         Pose = integer(),
+                         Pearson = numeric(),
+                         Spearman = numeric(),
+                         MAE = numeric(),
+                         RMSE = numeric(),
+                         IRM = numeric(),  # Nueva columna para IRM
+                         N = integer(),
+                         Variant = character(),
+                         Method = character(),
+                         stringsAsFactors = FALSE)
+
+# Define the list of Data Fusion Methods to apply
+fusion_methods <- c("Median", "Minimum", "Arithmetic", "Geometric", "Harmonic", "Euclidean")
+
+# -------------------------
+# Iterate over each protein dataset in `filtered_data_list`
+# -------------------------
+
+for (protein_name in names(filtered_data_list)) {
+  data_protein <- filtered_data_list[[protein_name]]
+  cat("\n🔎 Processing Protein:", protein_name, "\n")
+
+  for (fusion_method in fusion_methods) {
+    
+    start_pose <- ifelse(fusion_method == "Minimum", 1, 2)
+    #max_poses <- ifelse(fusion_method == "Minimum", 10, 100)
+    max_poses <- 100  # Set max poses to 100 for all methods, including "Minimum"
+
+    for (i in start_pose:max_poses) {
+      
+      # Filtrar los datos por poses
+      filtered_data <- data_protein %>%
+        filter(Poses <= i)  
+
+      for (energy_col in energy_columns) {
+        
+        # Aplicar la técnica de Data Fusion
+        if (fusion_method == "Median") {
+          fused_data <- median_value(filtered_data, energy_col)
+        } else if (fusion_method == "Minimum") {
+          fused_data <- minimum_value(filtered_data, energy_col, pose = i)
+        } else if (fusion_method == "Arithmetic") {
+          fused_data <- arithmetic_mean(filtered_data, energy_col)
+        } else if (fusion_method == "Geometric") {
+          fused_data <- geometric_mean(filtered_data, energy_col)
+        } else if (fusion_method == "Harmonic") {
+          fused_data <- harmonic_mean(filtered_data, energy_col)
+        } else if (fusion_method == "Euclidean") {
+          fused_data <- euclidean_mean(filtered_data, energy_col)
+        } else {
+          stop("Invalid Data Fusion Method")
+        }
+        
+        # Detect the correct name of the merged column
+        fusion_col_name <- colnames(fused_data)[which(colnames(fused_data) != "Title")]
+        
+        if (length(fusion_col_name) == 0) {
+          cat("Skipping", energy_col, "for", protein_name, "- Pose", i, "(not found in fused_data)\n")
+          next  # Skip this iteration
+        }
+        
+        # Merge with experimental data
+        merged_data <- left_join(
+          fused_data %>% distinct(Title, .keep_all = TRUE), 
+          data_protein %>% distinct(Title, .keep_all = TRUE), 
+          by = "Title"
+        )
+        
+        # Identify and remove duplicate columns (with .x and .y suffixes)
+        cols_to_remove <- grep("\\.y$", colnames(merged_data), value = TRUE)
+        merged_data <- merged_data %>%
+          select(-all_of(cols_to_remove))
+
+        # Rename columns by removing `.x` suffixes
+        colnames(merged_data) <- gsub("\\.x$", "", colnames(merged_data))
+
+        # Verify that the merged column still exists
+        if (!(energy_col %in% colnames(merged_data))) {
+          cat("Skipping", energy_col, "for", protein_name, "- Pose", i, "(not found in merged_data after cleanup)\n")
+          next
+        }
+
+        # Iterate over IC50 and pIC50
+        for (exp_variable in exp_variables) {
+          
+          # Filter non-null values ​​for calculations
+          valid_data <- merged_data %>%
+            filter(!is.na(.data[[exp_variable]]) & !is.na(.data[[energy_col]]))
+
+          n_used <- nrow(valid_data)
+          
+          if (n_used < 3) {
+            pose_df <- data.frame(
+              Protein = protein_name,
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = NA,
+              Spearman = NA,
+              MAE = NA,
+              RMSE = NA,
+              IRM = NA,  # We save NA in IRM if there is not enough data
+              N = n_used,
+              Variant = Variant,
+              Method = Method,
+              stringsAsFactors = FALSE
+            )
+          } else {
+            # Calculating correlations and metrics
+            cor_pearson <- cor(valid_data[[exp_variable]], valid_data[[energy_col]], use = "complete.obs")
+            cor_spearman <- cor(valid_data[[exp_variable]], valid_data[[energy_col]], use = "complete.obs", method = "spearman")
+            mae_value <- mean(abs(valid_data[[exp_variable]] - valid_data[[energy_col]]), na.rm = TRUE)
+            rmse_value <- sqrt(mean((valid_data[[exp_variable]] - valid_data[[energy_col]])^2, na.rm = TRUE))
+            irm_value <- calculate_irm(valid_data[[exp_variable]], valid_data[[energy_col]])  # Nuevo cálculo de IRM
+            
+            # Save results to the data frame
+            pose_df <- data.frame(
+              Protein = protein_name,
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = round(cor_pearson, 3),
+              Spearman = round(cor_spearman, 3),
+              MAE = round(mae_value, 3),
+              RMSE = round(rmse_value, 3),
+              IRM = round(irm_value, 3),  # Agregamos IRM
+              N = n_used,
+              Variant = Variant,
+              Method = Method,
+              stringsAsFactors = FALSE
+            )
+          }
+          
+          # Add results to the final dataframe
+          results_df <- bind_rows(results_df, pose_df)
+          
+        }  # End iteration on IC50 and pIC50
+      }  # End iteration on energy terms
+
+      # Free memory every 10 poses
+      if (i %% 10 == 0) {
+        gc()
+      }
+      
+    }  # End iteration over poses
+  }  #End iteration on fusion methods
+}  # End iteration on proteins
+
+# Save results in Excel
+write.xlsx(results_df, output_filename)
+
+#Success message
+cat("Data successfully saved to", output_filename, "\n")
+gc()
+
+```
+
+# **Variant 1 - 3 (MM-GBSA):**
+
+### **Load data**
+
+-   Modify `data_path` from **Load data**:
+
+```{r}
+# Load required libraries
+library(openxlsx)
+library(dplyr)
+library(stringr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the directory containing the Excel files
+data_path <- "/media/daniel/DATA2TB/DROP/Dropbox/UCM/Fondecyt_Iniciacion_2022/Aprovado/Etapas/Paper1/Paper_Hp/Analysis/Data_Variant_1_3_MMGBSA/"
+
+# List all .xlsx files in the directory
+file_list <- list.files(path = data_path, pattern = "*.xlsx", full.names = TRUE)
+
+# Extract protein names from filenames (Assumes filenames are formatted as: combined_data_Protein.xlsx)
+protein_names <- str_extract(basename(file_list), "(?<=combined_data_)[^\\.]+")
+
+# -------------------------
+# Load Data
+# -------------------------
+
+# Read each Excel file into a list of data frames
+data_list <- lapply(seq_along(file_list), function(i) {
+  file <- file_list[i]
+  protein <- protein_names[i]
+  
+  # Read file if it exists
+  if (file.exists(file)) {
+    df <- read.xlsx(file, sheet = 1)
+
+    # Remove pIC50.Exp if it exists
+    if ("pIC50.Exp" %in% colnames(df)) {
+      df <- df %>% select(-pIC50.Exp)
+    }
+    
+    # Remove pIC50 if it exists (it will be recalculated)
+    if ("pIC50" %in% colnames(df)) {
+      df <- df %>% select(-pIC50)
+    }
+    
+    # Calculate pIC50 from IC50 (IC50 is in µM, needs to be converted to M)
+    df <- df %>% mutate(pIC50 = -log10(IC50 * 1e-6))
+    
+    # Add protein name as a new column
+    df <- df %>% mutate(Protein = protein)
+    
+    return(df)
+  } else {
+    warning(paste("File not found:", file))
+    return(NULL)
+  }
+})
+
+# Assign names to the list for easier reference
+names(data_list) <- protein_names
+
+# -------------------------
+# Filter Data
+# -------------------------
+
+# Function to filter data
+filter_data <- function(df) {
+  df %>% 
+    filter(IC50 != 800 & !is.na(IC50) & pIC50 != 3.09 & !is.na(pIC50))
+}
+
+# Apply filtering to each dataset
+filtered_data_list <- lapply(data_list, function(df) {
+  if (!is.null(df)) {
+    filter_data(df)
+  } else {
+    NULL
+  }
+})
+
+# -------------------------
+# Summary of Removed Values
+# -------------------------
+
+# Count missing values and occurrences of 800 in IC50 and 3.09 in pIC50 before filtering
+missing_summary <- data.frame(
+  Protein = protein_names,
+  Missing_IC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$IC50)) else NA),
+  IC50_800 = sapply(data_list, function(df) if (!is.null(df)) sum(df$IC50 == 800, na.rm = TRUE) else NA),
+  Missing_pIC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$pIC50)) else NA),
+  pIC50_309 = sapply(data_list, function(df) if (!is.null(df)) sum(df$pIC50 == 3.09, na.rm = TRUE) else NA)
+)
+
+# Display the summary of removed values
+print(missing_summary)
+
+# The `filtered_data_list` now contains cleaned datasets for each protein.
+
+```
+
+### **Verify the number of compounds**
+
+Prints the number of unique compounds for each file
+
+```{r}
+# Function to count unique compounds (Title)
+count_unique_titles <- function(df) {
+  if (!is.null(df)) {
+    return(length(unique(df$Title)))
+  } else {
+    return(NA)
+  }
+}
+
+# Apply function to each dataset in the list
+unique_counts <- sapply(filtered_data_list, count_unique_titles)
+
+# Display the results
+print(unique_counts)
+```
+
+### Correlation Data Analysis (up-to 100)
+
+-   Modify `energy_columns` [docking or MM-GBSA terms] from **Correlation Data Analysis**
+
+-   Modify `output_filename` from **Correlation Data Analysis**
+
+-   Modify `Variant` and `Method` from **Correlation Data Analysis**
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(openxlsx)  # Required for Excel export
+
+# -------------------------
+# Define IRM Function
+# -------------------------
+
+# IRM: Inlier Ratio Metric - Proportion of predictions within the error threshold
+calculate_irm <- function(actual, predicted, threshold = 1.0) {
+  mean(abs(actual - predicted) <= threshold, na.rm = TRUE)  
+}
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the output filename
+output_filename <- "Correlation_Variant_1_3_MMGBSA_100poses.xlsx"
+
+# Define the variant and method
+Variant <- "1_3"
+Method <- "MMGBSA"
+
+# Define the energy-related columns to be analyzed
+energy_columns <- c("MMGBSABind", "MMGBSABind_Coulomb", "MMGBSABind_Hbond", 
+                    "MMGBSABind_Lipo", "MMGBSABind_Solv_GB", "MMGBSABind_vdW",
+                    "Prime_MMGBSA_ligand_efficiency")
+
+# Define experimental variables to compare (IC50 and pIC50)
+exp_variables <- c("IC50", "pIC50")
+
+# Define the list of Data Fusion Methods to apply
+fusion_methods <- c("Median", "Minimum", "Arithmetic", "Geometric", "Harmonic", "Euclidean")
+
+# -------------------------
+# Create an empty list to store results before combining
+# -------------------------
+
+results_list <- list()  
+
+# -------------------------
+# Iterate over each protein dataset in `filtered_data_list`
+# -------------------------
+
+for (protein_name in names(filtered_data_list)) {
+  data_protein <- filtered_data_list[[protein_name]]
+  
+  cat("\n🔎 Processing Protein:", protein_name, "\n")
+  
+  # Iterate over each Data Fusion Method
+  for (fusion_method in fusion_methods) {
+    
+    start_pose <- ifelse(fusion_method == "Minimum", 1, 2)
+    #max_poses <- ifelse(fusion_method == "Minimum", 10, 100)  # Define max poses
+    max_poses <- 100  # Set max poses to 100 for all methods, including "Minimum"
+    
+    # Iterate over the number of poses
+    for (i in start_pose:max_poses) {
+      
+      # Filter the dataset to include only the top `i` poses
+      filtered_data <- data_protein %>%
+        filter(Poses <= i)
+
+      # Iterate over each energy-related variable
+      for (energy_col in energy_columns) {
+        
+        # Apply the selected Data Fusion Method
+        if (fusion_method == "Minimum") {
+          fused_data <- minimum_value(filtered_data, energy_col, pose = i)
+        } else if (fusion_method == "Median") {
+          fused_data <- median_value(filtered_data, energy_col)
+        } else if (fusion_method == "Arithmetic") {
+          fused_data <- arithmetic_mean(filtered_data, energy_col)
+        } else if (fusion_method == "Geometric") {
+          fused_data <- geometric_mean(filtered_data, energy_col)
+        } else if (fusion_method == "Harmonic") {
+          fused_data <- harmonic_mean(filtered_data, energy_col)
+        } else if (fusion_method == "Euclidean") {
+          fused_data <- euclidean_mean(filtered_data, energy_col)
+        }
+        
+        # Merge the calculated values back with experimental data
+        merged_data <- left_join(fused_data, data_protein, by = "Title")
+
+        # Detect the correct column name after merging
+        fusion_col_name <- colnames(fused_data)[which(colnames(fused_data) != "Title")]
+
+        # Fix .x and .y issues in merged_data
+        if (paste0(fusion_col_name, ".x") %in% colnames(merged_data)) {
+          merged_data <- merged_data %>%
+            rename(!!fusion_col_name := !!sym(paste0(fusion_col_name, ".x"))) %>%
+            select(-one_of(paste0(fusion_col_name, ".y")))
+        }
+
+        # Iterate over IC50 and pIC50 for correlation analysis
+        for (exp_variable in exp_variables) {
+          
+          # Ensure there are no missing values in the correlation calculation
+          valid_data <- merged_data %>%
+            filter(!is.na(.data[[exp_variable]]) & !is.na(.data[[fusion_col_name]]))
+
+          # Count the number of valid data points
+          n_used <- nrow(valid_data)
+          
+          if (n_used < 3) {
+            pose_df <- data.frame(
+              Protein = protein_name,
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = NA,
+              Spearman = NA,
+              MAE = NA,
+              RMSE = NA,
+              IRM = NA,  # Nueva columna para IRM
+              N = n_used,
+              Variant = Variant,
+              Method = Method,
+              stringsAsFactors = FALSE
+            )
+            
+            cat("Warning: No valid data for", fusion_method, "- Pose", i, "- EnergyTerm:", energy_col, "- ExpVariable:", exp_variable, "- Protein:", protein_name, "\n")
+            
+          } else {
+            # Compute Pearson and Spearman correlations
+            cor_pearson <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs")
+            cor_spearman <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs", method = "spearman")
+            
+            # Compute MAE, RMSE, and IRM
+            mae_value <- mean(abs(valid_data[[exp_variable]] - valid_data[[fusion_col_name]]), na.rm = TRUE)
+            rmse_value <- sqrt(mean((valid_data[[exp_variable]] - valid_data[[fusion_col_name]])^2, na.rm = TRUE))
+            irm_value <- calculate_irm(valid_data[[exp_variable]], valid_data[[fusion_col_name]])  # Nuevo cálculo de IRM
+            
+            # Store results in dataframe
+            pose_df <- data.frame(
+              Protein = protein_name,
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = round(cor_pearson, 3),
+              Spearman = round(cor_spearman, 3),
+              MAE = round(mae_value, 3),
+              RMSE = round(rmse_value, 3),
+              IRM = round(irm_value, 3),  
+              N = n_used,
+              Variant = Variant,
+              Method = Method,
+              stringsAsFactors = FALSE
+            )
+          }
+          
+          # Append results to the list instead of `bind_rows()`
+          results_list <- append(results_list, list(pose_df))
+          
+        }  # End iteration over IC50 and pIC50
+      }  # End iteration over energy terms
+    }  # End iteration over poses
+    
+    # Garbage collection every method to prevent memory overload
+    gc()
+  }  # End iteration over Data Fusion Methods
+}  # End iteration over protein datasets
+
+# Combine all results into a single dataframe
+results_df <- do.call(rbind, results_list)
+
+# Save results to an Excel file
+write.xlsx(results_df, output_filename)
+
+cat("Data successfully saved to", output_filename, "\n")
+gc()
+
+```
+
+# **Variant 2 - 1 (IFD):**
+
+### **Load data**
+
+-   Modify `data_path` from **Load data**:
+
+```{r}
+# Load required libraries
+library(openxlsx)
+library(dplyr)
+library(stringr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the directory containing the Excel files
+data_path <- "/media/daniel/DATA2TB/DROP/Dropbox/UCM/Fondecyt_Iniciacion_2022/Aprovado/Etapas/Paper1/Paper_Hp/Analysis/Data_Variant_2_1_IFD/"
+
+# List all .xlsx files in the directory
+file_list <- list.files(path = data_path, pattern = "*.xlsx", full.names = TRUE)
+
+# Extract protein names from filenames (Assumes filenames are formatted as: combined_data_Protein.xlsx)
+protein_names <- str_extract(basename(file_list), "(?<=combined_data_)[^\\.]+") 
+
+# -------------------------
+# Load Data
+# -------------------------
+
+# Read each Excel file into a list of data frames
+data_list <- lapply(seq_along(file_list), function(i) {
+  file <- file_list[i]
+  protein <- protein_names[i]
+  
+  # Read file if it exists
+  if (file.exists(file)) {
+    df <- read.xlsx(file, sheet = 1)
+    
+    # Remove pIC50.Exp if it exists
+    if ("pIC50.Exp" %in% colnames(df)) {
+      df <- df %>% select(-pIC50.Exp)
+    }
+    
+    # Remove pIC50 if it exists
+    if ("pIC50" %in% colnames(df)) {
+      df <- df %>% select(-pIC50)
+    }
+    
+    # Calculate pIC50 from IC50 (IC50 is in µM, needs to be converted to M)
+    df <- df %>% mutate(pIC50 = -log10(IC50 * 1e-6))
+    
+    # Add protein name as a new column
+    df <- df %>% mutate(Protein = protein)
+    
+    return(df)
+  } else {
+    warning(paste("File not found:", file))
+    return(NULL)
+  }
+})
+
+# Assign names to the list for easier reference
+names(data_list) <- protein_names
+
+# -------------------------
+# Filter Data
+# -------------------------
+
+# Function to filter data
+filter_data <- function(df) {
+  df %>% 
+    filter(IC50 != 800 & !is.na(IC50) & pIC50 != 3.09 & !is.na(pIC50))
+}
+
+# Apply filtering to each dataset
+filtered_data_list <- lapply(data_list, function(df) {
+  if (!is.null(df)) {
+    filter_data(df)
+  } else {
+    NULL
+  }
+})
+
+# -------------------------
+# Summary of Removed Values
+# -------------------------
+
+# Count missing values and occurrences of 800 in IC50 and 3.09 in pIC50 before filtering
+missing_summary <- data.frame(
+  Protein = protein_names,
+  Missing_IC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$IC50)) else NA),
+  IC50_800 = sapply(data_list, function(df) if (!is.null(df)) sum(df$IC50 == 800, na.rm = TRUE) else NA),
+  Missing_pIC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$pIC50)) else NA),
+  pIC50_309 = sapply(data_list, function(df) if (!is.null(df)) sum(df$pIC50 == 3.09, na.rm = TRUE) else NA)
+)
+
+# Display the summary of removed values
+print(missing_summary)
+
+# The `filtered_data_list` now contains cleaned datasets for each protein.
+
+```
+
+### **Verify the number of compounds**
+
+Prints the number of unique compounds for each file
+
+```{r}
+# Function to count unique compounds (Title)
+count_unique_titles <- function(df) {
+  if (!is.null(df)) {
+    return(length(unique(df$Title)))
+  } else {
+    return(NA)
+  }
+}
+
+# Apply function to each dataset in the list
+unique_counts <- sapply(filtered_data_list, count_unique_titles)
+
+# Display the results
+print(unique_counts)
+
+```
+
+### Correlation Data Analysis
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(openxlsx)  # Required for Excel export
+
+# -------------------------
+# Define IRM Function
+# -------------------------
+
+# IRM: Inlier Ratio Metric - Proporción de predicciones dentro del umbral de error
+calculate_irm <- function(actual, predicted, threshold = 1.0) {
+  mean(abs(actual - predicted) <= threshold, na.rm = TRUE)  
+}
+
+# -------------------------
+# Define the Data Fusion Methods
+# -------------------------
+
+apply_data_fusion <- function(data, method, energy_col, pose = NULL) {
+  if (method == "Median") {
+    return(median_value(data, energy_col))
+  } else if (method == "Minimum") {
+    return(minimum_value(data, energy_col, pose))  
+  } else if (method == "Arithmetic") {
+    return(arithmetic_mean(data, energy_col))
+  } else if (method == "Geometric") {
+    return(geometric_mean(data, energy_col))
+  } else if (method == "Harmonic") {
+    return(harmonic_mean(data, energy_col))
+  } else if (method == "Euclidean") {
+    return(euclidean_mean(data, energy_col))
+  } else {
+    stop("Invalid Data Fusion Method")
+  }
+}
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the output filename
+output_filename <- "Correlation_Variant_2_1_IFD.xlsx"
+
+# Define the variant and method
+Variant <- "2_1"
+Method <- "IFD"
+
+# Define the energy-related columns to be analyzed
+energy_columns <- c("docking.score", "glide.ligand.efficiency", 
+                    "glide.gscore", "glide.emodel", "glide.energy", 
+                    "glide.einternal")
+
+# Define experimental variables to compare (IC50 and pIC50)
+exp_variables <- c("IC50", "pIC50")
+
+# -------------------------
+# Create a dataframe to store the results
+# -------------------------
+
+results_df <- data.frame(Protein = character(),
+                         ExpVariable = character(),
+                         DataFusion = character(),
+                         EnergyTerm = character(),
+                         Pose = integer(),
+                         Pearson = numeric(),
+                         Spearman = numeric(),
+                         MAE = numeric(),
+                         RMSE = numeric(),
+                         IRM = numeric(),  # Nueva columna para IRM
+                         N = integer(),
+                         Variant = character(),
+                         Method = character(),
+                         stringsAsFactors = FALSE)
+
+# Define the list of Data Fusion Methods to apply
+fusion_methods <- c("Median", "Minimum", "Arithmetic", "Geometric", "Harmonic", "Euclidean")
+
+# -------------------------
+# Iterate over each protein dataset in `filtered_data_list`
+# -------------------------
+
+for (protein_name in names(filtered_data_list)) {
+  data_protein <- filtered_data_list[[protein_name]]
+
+  for (fusion_method in fusion_methods) {
+    
+    start_pose <- ifelse(fusion_method == "Minimum", 1, 2)
+
+    for (i in start_pose:10) {
+      
+      # Filter data by poses
+      filtered_data <- data_protein %>%
+        filter(Poses <= i)  
+
+      for (energy_col in energy_columns) {
+        
+        # Apply the Data Fusion technique
+        if (fusion_method == "Minimum") {
+          fused_data <- apply_data_fusion(filtered_data, fusion_method, energy_col, pose = i)  
+        } else {
+          fused_data <- apply_data_fusion(filtered_data, fusion_method, energy_col)
+        }
+        
+        # Detect the correct name of the merged column
+        fusion_col_name <- colnames(fused_data)[which(colnames(fused_data) != "Title")]
+
+        # Merge with experimental data
+        merged_data <- left_join(fused_data, data_protein[, c("Title", exp_variables)], by = "Title")
+        
+        # Iterate over IC50 and pIC50
+        for (exp_variable in exp_variables) {
+          
+          # Filter non-null values for calculations
+          valid_data <- merged_data %>%
+            filter(!is.na(.data[[exp_variable]]) & !is.na(.data[[fusion_col_name]]))
+
+          n_used <- nrow(valid_data)
+          
+          if (n_used < 3) {
+            pose_df <- data.frame(
+              Protein = protein_name,  
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = NA,
+              Spearman = NA,
+              MAE = NA,
+              RMSE = NA,
+              IRM = NA,  # We save NA in MRI if there is not enough data
+              N = n_used,
+              Variant = Variant,  
+              Method = Method,  
+              stringsAsFactors = FALSE
+            )
+            
+          } else {
+            # Calculating correlations and metrics
+            cor_pearson <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs")
+            cor_spearman <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs", method = "spearman")
+            mae_value <- mean(abs(valid_data[[exp_variable]] - valid_data[[fusion_col_name]]), na.rm = TRUE)
+            rmse_value <- sqrt(mean((valid_data[[exp_variable]] - valid_data[[fusion_col_name]])^2, na.rm = TRUE))
+            irm_value <- calculate_irm(valid_data[[exp_variable]], valid_data[[fusion_col_name]])  # Nuevo cálculo de IRM
+            
+            # Save results to the data frame
+            pose_df <- data.frame(
+              Protein = protein_name,  
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = round(cor_pearson, 3),
+              Spearman = round(cor_spearman, 3),
+              MAE = round(mae_value, 3),
+              RMSE = round(rmse_value, 3),
+              IRM = round(irm_value, 3),  # We added IRM
+              N = n_used,
+              Variant = Variant,  
+              Method = Method,  
+              stringsAsFactors = FALSE
+            )
+          }
+          
+          # Add results to the final dataframe
+          results_df <- bind_rows(results_df, pose_df)
+          
+        }  # End iteration on IC50 and pIC50
+      }  # End iteration on energy terms
+    }  # End iteration over poses
+  }  # End iteration on fusion methods
+}  # End iteration on proteins
+
+# Save results in Excel
+write.xlsx(results_df, output_filename)
+
+# Success message
+cat("Data successfully saved to", output_filename, "\n")
+
+```
+
+# **Variant 2 - 2 (MMGBSA):**
+
+### **Load data**
+
+-   Modify `data_path` from **Load data**:
+
+```{r}
+# Load required libraries
+library(openxlsx)
+library(dplyr)
+library(stringr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the directory containing the Excel files
+data_path <- "/media/daniel/DATA2TB/DROP/Dropbox/UCM/Fondecyt_Iniciacion_2022/Aprovado/Etapas/Paper1/Paper_Hp/Analysis/Data_Variant_2_2_MMGBSA/"
+
+# List all .xlsx files in the directory
+file_list <- list.files(path = data_path, pattern = "*.xlsx", full.names = TRUE)
+
+# Extract protein names from filenames (Assumes filenames are formatted as: combined_data_Protein.xlsx)
+protein_names <- str_extract(basename(file_list), "(?<=combined_data_)[^\\.]+")
+
+# -------------------------
+# Load Data
+# -------------------------
+
+# Read each Excel file into a list of data frames
+data_list <- lapply(seq_along(file_list), function(i) {
+  file <- file_list[i]
+  protein <- protein_names[i]
+  
+  # Read file if it exists
+  if (file.exists(file)) {
+    df <- read.xlsx(file, sheet = 1)
+
+    # Remove pIC50.Exp if it exists
+    if ("pIC50.Exp" %in% colnames(df)) {
+      df <- df %>% select(-pIC50.Exp)
+    }
+    
+    # Remove pIC50 if it exists (it will be recalculated)
+    if ("pIC50" %in% colnames(df)) {
+      df <- df %>% select(-pIC50)
+    }
+    
+    # Calculate pIC50 from IC50 (IC50 is in µM, needs to be converted to M)
+    df <- df %>% mutate(pIC50 = -log10(IC50 * 1e-6))
+    
+    # Add protein name as a new column
+    df <- df %>% mutate(Protein = protein)
+    
+    return(df)
+  } else {
+    warning(paste("File not found:", file))
+    return(NULL)
+  }
+})
+
+# Assign names to the list for easier reference
+names(data_list) <- protein_names
+
+# -------------------------
+# Filter Data
+# -------------------------
+
+# Function to filter data
+filter_data <- function(df) {
+  df %>% 
+    filter(IC50 != 800 & !is.na(IC50) & pIC50 != 3.09 & !is.na(pIC50))
+}
+
+# Apply filtering to each dataset
+filtered_data_list <- lapply(data_list, function(df) {
+  if (!is.null(df)) {
+    filter_data(df)
+  } else {
+    NULL
+  }
+})
+
+# -------------------------
+# Summary of Removed Values
+# -------------------------
+
+# Count missing values and occurrences of 800 in IC50 and 3.09 in pIC50 before filtering
+missing_summary <- data.frame(
+  Protein = protein_names,
+  Missing_IC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$IC50)) else NA),
+  IC50_800 = sapply(data_list, function(df) if (!is.null(df)) sum(df$IC50 == 800, na.rm = TRUE) else NA),
+  Missing_pIC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$pIC50)) else NA),
+  pIC50_309 = sapply(data_list, function(df) if (!is.null(df)) sum(df$pIC50 == 3.09, na.rm = TRUE) else NA)
+)
+
+# Display the summary of removed values
+print(missing_summary)
+
+# The `filtered_data_list` now contains cleaned datasets for each protein.
+
+```
+
+### **Verify the number of compounds**
+
+Prints the number of unique compounds for each file
+
+```{r}
+# Function to count unique compounds (Title)
+count_unique_titles <- function(df) {
+  if (!is.null(df)) {
+    return(length(unique(df$Title)))
+  } else {
+    return(NA)
+  }
+}
+
+# Apply function to each dataset in the list
+unique_counts <- sapply(filtered_data_list, count_unique_titles)
+
+# Display the results
+print(unique_counts)
+```
+
+### Correlation Data Analysis
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(openxlsx)  # Required for Excel export
+
+# -------------------------
+# Define IRM Function
+# -------------------------
+
+# IRM: Inlier Ratio Metric - Proporción de predicciones dentro del umbral de error
+calculate_irm <- function(actual, predicted, threshold = 1.0) {
+  mean(abs(actual - predicted) <= threshold, na.rm = TRUE)  
+}
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the output filename
+output_filename <- "Correlation_Variant_2_2_MMGBSA_100poses.xlsx"
+
+# Define the variant and method
+Variant <- "2_2"
+Method <- "MMGBSA"
+
+# Define the energy-related columns to be analyzed
+energy_columns <- c("MMGBSABind", "MMGBSABind_Coulomb", "MMGBSABind_Hbond", 
+                    "MMGBSABind_Lipo", "MMGBSABind_Solv_GB", "MMGBSABind_vdW",
+                    "Prime_MMGBSA_ligand_efficiency")
+
+# Define experimental variables to compare (IC50 and pIC50)
+exp_variables <- c("IC50", "pIC50")
+
+# Define the list of Data Fusion Methods to apply
+fusion_methods <- c("Median", "Minimum", "Arithmetic", "Geometric", "Harmonic", "Euclidean")
+
+# -------------------------
+# Create an empty list to store results before combining
+# -------------------------
+
+results_list <- list()  
+
+# -------------------------
+# Iterate over each protein dataset in `filtered_data_list`
+# -------------------------
+
+for (protein_name in names(filtered_data_list)) {
+  data_protein <- filtered_data_list[[protein_name]]
+  
+  cat("\n🔎 Processing Protein:", protein_name, "\n")
+  
+  # Iterate over each Data Fusion Method
+  for (fusion_method in fusion_methods) {
+    
+    start_pose <- ifelse(fusion_method == "Minimum", 1, 2)
+    #max_poses <- ifelse(fusion_method == "Minimum", 10, 17)  # Define max poses
+    max_poses <- 100  # Set max poses to 100 for all methods, including "Minimum"
+    
+    # Iterate over the number of poses
+    for (i in start_pose:max_poses) {
+      
+      # Filter the dataset to include only the top `i` poses
+      filtered_data <- data_protein %>%
+        filter(Poses <= i)
+
+      # Iterate over each energy-related variable
+      for (energy_col in energy_columns) {
+        
+        # Apply the selected Data Fusion Method
+        if (fusion_method == "Minimum") {
+          fused_data <- minimum_value(filtered_data, energy_col, pose = i)
+        } else if (fusion_method == "Median") {
+          fused_data <- median_value(filtered_data, energy_col)
+        } else if (fusion_method == "Arithmetic") {
+          fused_data <- arithmetic_mean(filtered_data, energy_col)
+        } else if (fusion_method == "Geometric") {
+          fused_data <- geometric_mean(filtered_data, energy_col)
+        } else if (fusion_method == "Harmonic") {
+          fused_data <- harmonic_mean(filtered_data, energy_col)
+        } else if (fusion_method == "Euclidean") {
+          fused_data <- euclidean_mean(filtered_data, energy_col)
+        }
+        
+        # Merge the calculated values back with experimental data
+        merged_data <- left_join(fused_data, data_protein, by = "Title")
+
+        # Detect the correct column name after merging
+        fusion_col_name <- colnames(fused_data)[which(colnames(fused_data) != "Title")]
+
+        # Fix .x and .y issues in merged_data
+        if (paste0(fusion_col_name, ".x") %in% colnames(merged_data)) {
+          merged_data <- merged_data %>%
+            rename(!!fusion_col_name := !!sym(paste0(fusion_col_name, ".x"))) %>%
+            select(-one_of(paste0(fusion_col_name, ".y")))
+        }
+
+        # Iterate over IC50 and pIC50 for correlation analysis
+        for (exp_variable in exp_variables) {
+          
+          # Ensure there are no missing values in the correlation calculation
+          valid_data <- merged_data %>%
+            filter(!is.na(.data[[exp_variable]]) & !is.na(.data[[fusion_col_name]]))
+
+          # Count the number of valid data points
+          n_used <- nrow(valid_data)
+          
+          if (n_used < 3) {
+            pose_df <- data.frame(
+              Protein = protein_name,
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = NA,
+              Spearman = NA,
+              MAE = NA,
+              RMSE = NA,
+              IRM = NA,  # Nueva columna para IRM
+              N = n_used,
+              Variant = Variant,
+              Method = Method,
+              stringsAsFactors = FALSE
+            )
+            
+            cat(" Warning: No valid data for", fusion_method, "- Pose", i, "- EnergyTerm:", energy_col, "- ExpVariable:", exp_variable, "- Protein:", protein_name, "\n")
+            
+          } else {
+            # Compute Pearson and Spearman correlations
+            cor_pearson <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs")
+            cor_spearman <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs", method = "spearman")
+            
+            # Compute MAE, RMSE, and IRM
+            mae_value <- mean(abs(valid_data[[exp_variable]] - valid_data[[fusion_col_name]]), na.rm = TRUE)
+            rmse_value <- sqrt(mean((valid_data[[exp_variable]] - valid_data[[fusion_col_name]])^2, na.rm = TRUE))
+            irm_value <- calculate_irm(valid_data[[exp_variable]], valid_data[[fusion_col_name]])  # ✅ Nuevo cálculo de IRM
+            
+            # Store results in dataframe
+            pose_df <- data.frame(
+              Protein = protein_name,
+              ExpVariable = exp_variable,
+              DataFusion = fusion_method,
+              EnergyTerm = energy_col,
+              Pose = i,
+              Pearson = round(cor_pearson, 3),
+              Spearman = round(cor_spearman, 3),
+              MAE = round(mae_value, 3),
+              RMSE = round(rmse_value, 3),
+              IRM = round(irm_value, 3),  
+              N = n_used,
+              Variant = Variant,
+              Method = Method,
+              stringsAsFactors = FALSE
+            )
+          }
+          
+          # Append results to the list instead of `bind_rows()`
+          results_list <- append(results_list, list(pose_df))
+          
+        }  # End iteration over IC50 and pIC50
+      }  # End iteration over energy terms
+    }  # End iteration over poses
+    
+    # Garbage collection every method to prevent memory overload
+    gc()
+  }  # End iteration over Data Fusion Methods
+}  # End iteration over protein datasets
+
+# Combine all results into a single dataframe
+results_df <- do.call(rbind, results_list)
+
+# Save results to an Excel file
+write.xlsx(results_df, output_filename)
+
+cat("Data successfully saved to", output_filename, "\n")
+gc()
+
+```
+
+# **Variant 3 (ED)**
+
+Need modify:
+
+-   Modify `data_path` from **Load data**:
+
+-   Modify `energy_columns` [docking or MM-GBSA terms] from **Correlation Data Analysis**
+
+-   Modify `output_filename` from **Correlation Data Analysis**
+
+-   Modify `Variant` and `Method` from **Correlation Data Analysis**
+
+### **Load data**
+
+Load data automatically from the data_path
+
+```{r}
+# Load required libraries
+library(openxlsx)
+library(dplyr)
+library(stringr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the directory containing the Excel files
+data_path <- "/media/daniel/DATA2TB/DROP/Dropbox/UCM/Fondecyt_Iniciacion_2022/Aprovado/Etapas/Paper1/Paper_Hp/Analysis/02_Data_Variants/Data_Variant_3_ED/"
+
+# List all .xlsx files in the directory
+file_list <- list.files(path = data_path, pattern = "*.xlsx", full.names = TRUE)
+
+# Extract protein names from filenames (Assumes filenames are formatted as: combined_data_Protein.xlsx)
+protein_names <- str_extract(basename(file_list), "(?<=combined_data_)[^\\.]+") 
+
+# -------------------------
+# Load Data
+# -------------------------
+
+# Read each Excel file into a list of data frames
+data_list <- lapply(seq_along(file_list), function(i) {
+  file <- file_list[i]
+  protein <- protein_names[i]
+  
+  # Read file if it exists
+  if (file.exists(file)) {
+    df <- read.xlsx(file, sheet = 1)
+    
+    # Remove pIC50.Exp if it exists
+    if ("pIC50.Exp" %in% colnames(df)) {
+      df <- df %>% select(-pIC50.Exp)
+    }
+    
+    # Remove pIC50 if it exists
+    if ("pIC50" %in% colnames(df)) {
+      df <- df %>% select(-pIC50)
+    }
+    
+    # Calculate pIC50 from IC50 (IC50 is in µM, needs to be converted to M)
+    df <- df %>% mutate(pIC50 = -log10(IC50 * 1e-6))
+    
+    # Add protein name as a new column
+    df <- df %>% mutate(Protein = protein)
+    
+    return(df)
+  } else {
+    warning(paste("File not found:", file))
+    return(NULL)
+  }
+})
+
+# Assign names to the list for easier reference
+names(data_list) <- protein_names
+
+# -------------------------
+# Filter Data
+# -------------------------
+
+# Function to filter data
+filter_data <- function(df) {
+  df %>% 
+    filter(IC50 != 800 & !is.na(IC50) & pIC50 != 3.09 & !is.na(pIC50))
+}
+
+# Apply filtering to each dataset
+filtered_data_list <- lapply(data_list, function(df) {
+  if (!is.null(df)) {
+    filter_data(df)
+  } else {
+    NULL
+  }
+})
+
+# -------------------------
+# Summary of Removed Values
+# -------------------------
+
+# Count missing values and occurrences of 800 in IC50 and 3.09 in pIC50 before filtering
+missing_summary <- data.frame(
+  Protein = protein_names,
+  Missing_IC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$IC50)) else NA),
+  IC50_800 = sapply(data_list, function(df) if (!is.null(df)) sum(df$IC50 == 800, na.rm = TRUE) else NA),
+  Missing_pIC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$pIC50)) else NA),
+  pIC50_309 = sapply(data_list, function(df) if (!is.null(df)) sum(df$pIC50 == 3.09, na.rm = TRUE) else NA)
+)
+
+# Display the summary of removed values
+print(missing_summary)
+
+# The `filtered_data_list` now contains cleaned datasets for each protein.
+
+```
+
+### **Verify the number of compounds**
+
+Prints the number of unique compounds for each file
+
+```{r}
+# Function to count unique compounds (Title)
+count_unique_titles <- function(df) {
+  if (!is.null(df)) {
+    return(length(unique(df$Title)))
+  } else {
+    return(NA)
+  }
+}
+
+# Apply function to each dataset in the list
+unique_counts <- sapply(filtered_data_list, count_unique_titles)
+
+# Display the results
+print(unique_counts)
+
+```
+
+### Correlation Data Analysis
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(openxlsx)  # Required for Excel export
+library(stringr)   # For regex operations
+
+# -------------------------
+# Define IRM Function
+# -------------------------
+
+# IRM: Inlier Ratio Metric - Proporción de predicciones dentro del umbral de error
+calculate_irm <- function(actual, predicted, threshold = 1.0) {
+  mean(abs(actual - predicted) <= threshold, na.rm = TRUE)  
+}
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the output filename
+output_filename <- "Correlation_Variant_3_ED.xlsx"
+
+# Define the variant and method
+Variant <- "3"
+Method <- "ED"
+
+# Define whether to compute Data Fusion across all frames or per frame
+fusion_mode <- "both"  # Options: "combined", "per_frame", or "both"
+
+# Define the energy-related columns to be analyzed
+energy_columns <- c("docking.score", "glide.ligand.efficiency", 
+                    "glide.gscore", "glide.emodel", "glide.energy", 
+                    "glide.einternal")
+
+# Define experimental variables to compare (IC50 and pIC50)
+exp_variables <- c("IC50", "pIC50")
+
+# Define the list of Data Fusion Methods to apply
+fusion_methods <- c("Median", "Minimum", "Arithmetic", "Geometric", "Harmonic", "Euclidean")
+
+# -------------------------
+# Create an empty list to store results before combining
+# -------------------------
+
+results_list <- list()  
+
+# -------------------------
+# Iterate over each protein dataset in `filtered_data_list`
+# -------------------------
+
+for (protein_name in names(filtered_data_list)) {
+  data_protein <- filtered_data_list[[protein_name]]
+  
+  cat("\n🔎 Processing Protein:", protein_name, "\n")
+
+  # Definir cómo tratar los frames
+  frame_groups <- list()
+
+  if (fusion_mode == "combined" || fusion_mode == "both") {
+    frame_groups[["All_Frames"]] <- data_protein  
+  }
+  
+  if (fusion_mode == "per_frame" || fusion_mode == "both") {
+    unique_frames <- unique(data_protein$Frame)
+    for (frame_id in unique_frames) {
+      frame_groups[[as.character(frame_id)]] <- filter(data_protein, Frame == frame_id)
+    }
+  }
+
+  # Iterar sobre cada opción de agrupación de frames (todos o por separado)
+  for (frame_id in names(frame_groups)) {
+    frame_data <- frame_groups[[frame_id]]
+
+    # Asegurar que la columna `Frame` es un string
+    frame_data$Frame <- as.character(frame_data$Frame)
+
+    # Iterate over each Data Fusion Method
+    for (fusion_method in fusion_methods) {
+      
+      start_pose <- ifelse(fusion_method == "Minimum", 1, 2)
+      #max_poses <- ifelse(fusion_method == "Minimum", 10, 30)  # 
+      max_poses <- 100  # Set max poses to 100 for all methods, including "Minimum"
+      
+      # Iterate over the number of poses
+      for (i in start_pose:max_poses) {
+        
+        # Verificar si hay suficientes poses en el conjunto de datos
+        available_poses <- unique(frame_data$Poses)
+        if (!i %in% available_poses) {
+          cat(" Skipping Pose", i, "for", fusion_method, "- Frame:", frame_id, "(Not enough poses available)\n")
+          next  # Salta la iteración si la pose no existe
+        }
+        
+        # Filter the dataset to include only the top `i` poses
+        filtered_data <- frame_data %>%
+          filter(Poses <= i)
+
+        # Iterate over each energy-related variable
+        for (energy_col in energy_columns) {
+          
+          # Apply the selected Data Fusion Method
+          if (fusion_method == "Minimum") {
+            fused_data <- minimum_value(filtered_data, energy_col, pose = i)
+          } else if (fusion_method == "Median") {
+            fused_data <- median_value(filtered_data, energy_col)
+          } else if (fusion_method == "Arithmetic") {
+            fused_data <- arithmetic_mean(filtered_data, energy_col)
+          } else if (fusion_method == "Geometric") {
+            fused_data <- geometric_mean(filtered_data, energy_col)
+          } else if (fusion_method == "Harmonic") {
+            fused_data <- harmonic_mean(filtered_data, energy_col)
+          } else if (fusion_method == "Euclidean") {
+            fused_data <- euclidean_mean(filtered_data, energy_col)
+          }
+
+          # Merge the calculated values back with experimental data
+          merged_data <- suppressWarnings(
+            left_join(fused_data, frame_data, by = "Title")
+          )
+
+          # Detect the correct column name after merging
+          fusion_col_name <- colnames(fused_data)[which(colnames(fused_data) != "Title")]
+
+          # Fix .x and .y issues in merged_data
+          if (paste0(fusion_col_name, ".x") %in% colnames(merged_data)) {
+            merged_data <- merged_data %>%
+              rename(!!fusion_col_name := !!sym(paste0(fusion_col_name, ".x"))) %>%
+              select(-one_of(paste0(fusion_col_name, ".y")))
+          }
+
+          # Iterate over IC50 and pIC50 for correlation analysis
+          for (exp_variable in exp_variables) {
+            
+            # Ensure there are no missing values in the correlation calculation
+            valid_data <- merged_data %>%
+              filter(!is.na(.data[[exp_variable]]) & !is.na(.data[[fusion_col_name]]))
+
+            # Count the number of valid data points
+            n_used <- nrow(valid_data)
+            
+            if (n_used < 3) {
+              pose_df <- data.frame(
+                Protein = protein_name,
+                Frame = frame_id,  # Ahora almacena el frame correctamente (ej. "frame280")
+                ExpVariable = exp_variable,
+                DataFusion = fusion_method,
+                EnergyTerm = energy_col,
+                Pose = i,
+                Pearson = NA,
+                Spearman = NA,
+                MAE = NA,
+                RMSE = NA,
+                IRM = NA,  # Nueva columna para IRM
+                N = n_used,
+                Variant = Variant,
+                Method = Method,
+                stringsAsFactors = FALSE
+              )
+              
+              cat(" Warning: No valid data for", fusion_method, "- Pose", i, "- EnergyTerm:", energy_col, "- ExpVariable:", exp_variable, "- Protein:", protein_name, "- Frame:", frame_id, "\n")
+              
+            } else {
+              # Compute Pearson and Spearman correlations
+              cor_pearson <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs")
+              cor_spearman <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs", method = "spearman")
+              
+              # Compute MAE, RMSE, and IRM
+              mae_value <- mean(abs(valid_data[[exp_variable]] - valid_data[[fusion_col_name]]), na.rm = TRUE)
+              rmse_value <- sqrt(mean((valid_data[[exp_variable]] - valid_data[[fusion_col_name]])^2, na.rm = TRUE))
+              irm_value <- calculate_irm(valid_data[[exp_variable]], valid_data[[fusion_col_name]])  # Nuevo cálculo de IRM
+              
+              # Store results in dataframe
+              pose_df <- data.frame(
+                Protein = protein_name,
+                Frame = frame_id,  # Ahora almacena el frame correctamente (ej. "frame280")
+                ExpVariable = exp_variable,
+                DataFusion = fusion_method,
+                EnergyTerm = energy_col,
+                Pose = i,
+                Pearson = round(cor_pearson, 3),
+                Spearman = round(cor_spearman, 3),
+                MAE = round(mae_value, 3),
+                RMSE = round(rmse_value, 3),
+                IRM = round(irm_value, 3),  # Agregado IRM
+                N = n_used,
+                Variant = Variant,
+                Method = Method,
+                stringsAsFactors = FALSE
+              )
+            }
+            
+            # Append results to the list instead of `bind_rows()`
+            results_list <- append(results_list, list(pose_df))
+            
+          }  # End iteration over IC50 and pIC50
+        }  # End iteration over energy terms
+      }  # End iteration over poses
+      gc()  # Garbage collection
+    }  # End iteration over frames
+  }
+}
+
+# Combine all results into a single dataframe
+results_df <- do.call(rbind, results_list)
+
+# Save results to an Excel file
+write.xlsx(results_df, output_filename)
+
+cat("Data successfully saved to", output_filename, "\n")
+gc()
+
+```
+
+# **Variant 4 (MM-GBSA)**
+
+Need modify:
+
+-   Modify `data_path` from **Load data**:
+
+-   Modify `energy_columns` [docking or MM-GBSA terms] from **Correlation Data Analysis**
+
+-   Modify `output_filename` from **Correlation Data Analysis**
+
+-   Modify `Variant` and `Method` from **Correlation Data Analysis**
+
+### **Load data**
+
+Load data automatically from the data_path
+
+```{r}
+# Load required libraries
+library(openxlsx)
+library(dplyr)
+library(stringr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the directory containing the Excel files
+data_path <- "/media/daniel/DATA2TB/DROP/Dropbox/UCM/Fondecyt_Iniciacion_2022/Aprovado/Etapas/Paper1/Paper_Hp/Analysis/Data_Variant_4_MMGBSA/"
+
+# List all .xlsx files in the directory
+file_list <- list.files(path = data_path, pattern = "*.xlsx", full.names = TRUE)
+
+# Extract protein names from filenames (Assumes filenames are formatted as: combined_data_Protein.xlsx)
+protein_names <- str_extract(basename(file_list), "(?<=combined_data_)[^\\.]+")
+
+# -------------------------
+# Load Data
+# -------------------------
+
+# Read each Excel file into a list of data frames
+data_list <- lapply(seq_along(file_list), function(i) {
+  file <- file_list[i]
+  protein <- protein_names[i]
+  
+  # Read file if it exists
+  if (file.exists(file)) {
+    df <- read.xlsx(file, sheet = 1)
+
+    # Remove pIC50.Exp if it exists
+    if ("pIC50.Exp" %in% colnames(df)) {
+      df <- df %>% select(-pIC50.Exp)
+    }
+    
+    # Remove pIC50 if it exists (it will be recalculated)
+    if ("pIC50" %in% colnames(df)) {
+      df <- df %>% select(-pIC50)
+    }
+    
+    # Calculate pIC50 from IC50 (IC50 is in µM, needs to be converted to M)
+    df <- df %>% mutate(pIC50 = -log10(IC50 * 1e-6))
+    
+    # Add protein name as a new column
+    df <- df %>% mutate(Protein = protein)
+    
+    return(df)
+  } else {
+    warning(paste("File not found:", file))
+    return(NULL)
+  }
+})
+
+# Assign names to the list for easier reference
+names(data_list) <- protein_names
+
+# -------------------------
+# Filter Data
+# -------------------------
+
+# Function to filter data
+filter_data <- function(df) {
+  df %>% 
+    filter(IC50 != 800 & !is.na(IC50) & pIC50 != 3.09 & !is.na(pIC50))
+}
+
+# Apply filtering to each dataset
+filtered_data_list <- lapply(data_list, function(df) {
+  if (!is.null(df)) {
+    filter_data(df)
+  } else {
+    NULL
+  }
+})
+
+# -------------------------
+# Summary of Removed Values
+# -------------------------
+
+# Count missing values and occurrences of 800 in IC50 and 3.09 in pIC50 before filtering
+missing_summary <- data.frame(
+  Protein = protein_names,
+  Missing_IC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$IC50)) else NA),
+  IC50_800 = sapply(data_list, function(df) if (!is.null(df)) sum(df$IC50 == 800, na.rm = TRUE) else NA),
+  Missing_pIC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$pIC50)) else NA),
+  pIC50_309 = sapply(data_list, function(df) if (!is.null(df)) sum(df$pIC50 == 3.09, na.rm = TRUE) else NA)
+)
+
+# Display the summary of removed values
+print(missing_summary)
+
+# The `filtered_data_list` now contains cleaned datasets for each protein.
+
+```
+
+### **Verify the number of compounds**
+
+Prints the number of unique compounds for each file
+
+```{r}
+# Function to count unique compounds (Title)
+count_unique_titles <- function(df) {
+  if (!is.null(df)) {
+    return(length(unique(df$Title)))
+  } else {
+    return(NA)
+  }
+}
+
+# Apply function to each dataset in the list
+unique_counts <- sapply(filtered_data_list, count_unique_titles)
+
+# Display the results
+print(unique_counts)
+
+## if the result is zero, then change title by Title in xlsx files!
+```
+
+### Correlation Data Analysis
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(openxlsx)  # Required for Excel export
+
+# -------------------------
+# Define IRM Function
+# -------------------------
+
+# IRM: Inlier Ratio Metric - Proporción de predicciones dentro del umbral de error
+calculate_irm <- function(actual, predicted, threshold = 1.0) {
+  mean(abs(actual - predicted) <= threshold, na.rm = TRUE)  
+}
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the output filename
+output_filename <- "Correlation_Variant_4_MMGBSA.xlsx"
+
+# Define the variant and method
+Variant <- "4"
+Method <- "MMGBSA"
+
+# Define whether to compute Data Fusion across all frames or per frame
+fusion_mode <- "both"  # Options: "combined", "per_frame", or "both"
+
+# Define the energy-related columns to be analyzed
+energy_columns <- c("MMGBSABind", "MMGBSABind_Coulomb", "MMGBSABind_Hbond", 
+                    "MMGBSABind_Lipo", "MMGBSABind_Solv_GB", "MMGBSABind_vdW",
+                    "Prime_MMGBSA_ligand_efficiency")
+
+# Define experimental variables to compare (IC50 and pIC50)
+exp_variables <- c("IC50", "pIC50")
+
+# Define the list of Data Fusion Methods to apply
+fusion_methods <- c("Median", "Minimum", "Arithmetic", "Geometric", "Harmonic", "Euclidean")
+
+# -------------------------
+# Create an empty list to store results before combining
+# -------------------------
+
+results_list <- list()  
+
+# -------------------------
+# Iterate over each protein dataset in `filtered_data_list`
+# -------------------------
+
+for (protein_name in names(filtered_data_list)) {
+  data_protein <- filtered_data_list[[protein_name]]
+  
+  cat("\n🔎 Processing Protein:", protein_name, "\n")
+
+  # Definir cómo tratar los frames
+  frame_groups <- list()
+
+  if (fusion_mode == "combined" || fusion_mode == "both") {
+    frame_groups[["All_Frames"]] <- data_protein  
+  }
+  
+  if (fusion_mode == "per_frame" || fusion_mode == "both") {
+    unique_frames <- unique(data_protein$Frame)
+    for (frame_id in unique_frames) {
+      frame_groups[[as.character(frame_id)]] <- filter(data_protein, Frame == frame_id)
+    }
+  }
+
+ 
+  for (frame_id in names(frame_groups)) {
+    frame_data <- frame_groups[[frame_id]]
+
+   
+    frame_data$Frame <- as.character(frame_data$Frame)
+
+    # Iterate over each Data Fusion Method
+    for (fusion_method in fusion_methods) {
+      
+      start_pose <- ifelse(fusion_method == "Minimum", 1, 2)
+      #max_poses <- ifelse(fusion_method == "Minimum", 10, 10)  # Define max poses
+      max_poses <- 100  # Set max poses to 100 for all methods, including "Minimum"
+
+      # Iterate over the number of poses
+      for (i in start_pose:max_poses) {
+        
+        # Filter the dataset to include only the top `i` poses
+        filtered_data <- frame_data %>%
+          filter(Poses <= i)
+
+        # Iterate over each energy-related variable
+        for (energy_col in energy_columns) {
+          
+          # Apply the selected Data Fusion Method
+          if (fusion_method == "Minimum") {
+            fused_data <- minimum_value(filtered_data, energy_col, pose = i)
+          } else if (fusion_method == "Median") {
+            fused_data <- median_value(filtered_data, energy_col)
+          } else if (fusion_method == "Arithmetic") {
+            fused_data <- arithmetic_mean(filtered_data, energy_col)
+          } else if (fusion_method == "Geometric") {
+            fused_data <- geometric_mean(filtered_data, energy_col)
+          } else if (fusion_method == "Harmonic") {
+            fused_data <- harmonic_mean(filtered_data, energy_col)
+          } else if (fusion_method == "Euclidean") {
+            fused_data <- euclidean_mean(filtered_data, energy_col)
+          }
+
+          # Merge the calculated values back with experimental data
+          merged_data <- suppressWarnings(left_join(fused_data, frame_data, by = "Title"))
+
+          # Detect the correct column name after merging
+          fusion_col_name <- colnames(fused_data)[which(colnames(fused_data) != "Title")]
+
+          # Fix .x and .y issues in merged_data
+          if (paste0(fusion_col_name, ".x") %in% colnames(merged_data)) {
+            merged_data <- merged_data %>%
+              rename(!!fusion_col_name := !!sym(paste0(fusion_col_name, ".x"))) %>%
+              select(-one_of(paste0(fusion_col_name, ".y")))
+          }
+
+          # Iterate over IC50 and pIC50 for correlation analysis
+          for (exp_variable in exp_variables) {
+            
+            # Ensure there are no missing values in the correlation calculation
+            valid_data <- merged_data %>%
+              filter(!is.na(.data[[exp_variable]]) & !is.na(.data[[fusion_col_name]]))
+
+            # Count the number of valid data points
+            n_used <- nrow(valid_data)
+            
+            if (n_used < 3) {
+              pose_df <- data.frame(
+                Protein = protein_name,
+                Frame = frame_id,  
+                ExpVariable = exp_variable,
+                DataFusion = fusion_method,
+                EnergyTerm = energy_col,
+                Pose = i,
+                Pearson = NA,
+                Spearman = NA,
+                MAE = NA,
+                RMSE = NA,
+                IRM = NA,  
+                N = n_used,
+                Variant = Variant,
+                Method = Method,
+                stringsAsFactors = FALSE
+              )
+              
+              cat(" Warning: No valid data for", fusion_method, "- Pose", i, "- EnergyTerm:", energy_col, "- ExpVariable:", exp_variable, "- Protein:", protein_name, "- Frame:", frame_id, "\n")
+              
+            } else {
+              # Compute Pearson and Spearman correlations
+              cor_pearson <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs")
+              cor_spearman <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs", method = "spearman")
+              
+              # Compute MAE, RMSE, and IRM
+              mae_value <- mean(abs(valid_data[[exp_variable]] - valid_data[[fusion_col_name]]), na.rm = TRUE)
+              rmse_value <- sqrt(mean((valid_data[[exp_variable]] - valid_data[[fusion_col_name]])^2, na.rm = TRUE))
+              irm_value <- calculate_irm(valid_data[[exp_variable]], valid_data[[fusion_col_name]])   
+              
+              # Store results in dataframe
+              pose_df <- data.frame(
+                Protein = protein_name,
+                Frame = frame_id,  
+                ExpVariable = exp_variable,
+                DataFusion = fusion_method,
+                EnergyTerm = energy_col,
+                Pose = i,
+                Pearson = round(cor_pearson, 3),
+                Spearman = round(cor_spearman, 3),
+                MAE = round(mae_value, 3),
+                RMSE = round(rmse_value, 3),
+                IRM = round(irm_value, 3), 
+                N = n_used,
+                Variant = Variant,
+                Method = Method,
+                stringsAsFactors = FALSE
+              )
+            }
+            
+            # Append results to the list instead of `bind_rows()`
+            results_list <- append(results_list, list(pose_df))
+            
+          }  # End iteration over IC50 and pIC50
+        }  # End iteration over energy terms
+      }  # End iteration over poses
+      
+      # Garbage collection every 10 poses to prevent memory overload
+      gc()
+    }  # End iteration over frames
+  }  # End iteration over Data Fusion Methods
+}  # End iteration over pr
+
+# Combine all results into a single dataframe
+results_df <- do.call(rbind, results_list)
+
+# Save results to an Excel file
+write.xlsx(results_df, output_filename)
+
+cat("Data successfully saved to", output_filename, "\n")
+gc()
+```
+
+# **Variant 5 (QPLD):**
+
+### **Load data**
+
+-   Modify `data_path` from **Load data**:
+
+```{r}
+# Load required libraries
+library(openxlsx)
+library(dplyr)
+library(stringr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the directory containing the Excel files
+data_path <- "02_Data_Variants/Data_Variant_5_QPLD/"
+
+# List all .xlsx files in the directory
+file_list <- list.files(path = data_path, pattern = "*.xlsx", full.names = TRUE)
+
+# Extract protein names from filenames (Assumes filenames are formatted as: combined_data_Protein.xlsx)
+protein_names <- str_extract(basename(file_list), "(?<=combined_data_)[^\\.]+")
+
+# -------------------------
+# Load Data
+# -------------------------
+
+# Read each Excel file into a list of data frames
+data_list <- lapply(seq_along(file_list), function(i) {
+  file <- file_list[i]
+  protein <- protein_names[i]
+  
+  # Read file if it exists
+  if (file.exists(file)) {
+    df <- read.xlsx(file, sheet = 1)
+    
+    # Remove pIC50.Exp if it exists
+    if ("pIC50.Exp" %in% colnames(df)) {
+      df <- df %>% select(-pIC50.Exp)
+    }
+    
+    # Remove pIC50 if it exists
+    if ("pIC50" %in% colnames(df)) {
+      df <- df %>% select(-pIC50)
+    }
+    
+    # Remove last "_X" from Title
+    df <- df %>% mutate(Title = str_replace(Title, "_\\d+$", ""))
+    
+    # Calculate pIC50 from IC50 (IC50 is in µM, needs to be converted to M)
+    df <- df %>% mutate(pIC50 = -log10(IC50 * 1e-6))
+    
+    # Add protein name as a new column
+    df <- df %>% mutate(Protein = protein)
+    
+    return(df)
+  } else {
+    warning(paste("File not found:", file))
+    return(NULL)
+  }
+})
+
+# Assign names to the list for easier reference
+names(data_list) <- protein_names
+
+# -------------------------
+# Filter Data
+# -------------------------
+
+# Function to filter data
+filter_data <- function(df) {
+  df %>% 
+    filter(IC50 != 800 & !is.na(IC50) & pIC50 != 3.09 & !is.na(pIC50))
+}
+
+# Apply filtering to each dataset
+filtered_data_list <- lapply(data_list, function(df) {
+  if (!is.null(df)) {
+    filter_data(df)
+  } else {
+    NULL
+  }
+})
+
+# -------------------------
+# Summary of Removed Values
+# -------------------------
+
+# Count missing values and occurrences of 800 in IC50 and 3.09 in pIC50 before filtering
+missing_summary <- data.frame(
+  Protein = protein_names,
+  Missing_IC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$IC50)) else NA),
+  IC50_800 = sapply(data_list, function(df) if (!is.null(df)) sum(df$IC50 == 800, na.rm = TRUE) else NA),
+  Missing_pIC50 = sapply(data_list, function(df) if (!is.null(df)) sum(is.na(df$pIC50)) else NA),
+  pIC50_309 = sapply(data_list, function(df) if (!is.null(df)) sum(df$pIC50 == 3.09, na.rm = TRUE) else NA)
+)
+
+# Display the summary of removed values
+print(missing_summary)
+
+# The `filtered_data_list` now contains cleaned datasets for each protein.
+
+```
+
+### **Verify the number of compounds**
+
+Prints the number of unique compounds for each file
+
+```{r}
+
+# Function to count unique compounds (Title)
+count_unique_titles <- function(df) {
+  if (!is.null(df)) {
+    return(length(unique(df$Title)))
+  } else {
+    return(NA)
+  }
+}
+
+# Apply function to each dataset in the list
+unique_counts <- sapply(filtered_data_list, count_unique_titles)
+
+# Display the results
+print(unique_counts)
+```
+
+### Correlation Data Analysis
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(openxlsx)  # Required for Excel export
+library(stringr)   # For regex operations
+
+# -------------------------
+# Define IRM Function
+# -------------------------
+
+# IRM: Inlier Ratio Metric - Proporción de predicciones dentro del umbral de error
+calculate_irm <- function(actual, predicted, threshold = 1.0) {
+  mean(abs(actual - predicted) <= threshold, na.rm = TRUE)  
+}
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the output filename
+output_filename <- "Correlation_Variant_5_QPLD_1E9Y.xlsx"
+
+# Define the variant and method
+Variant <- "5"
+Method <- "QPLD"
+
+# Define whether to compute Data Fusion across all frames or per frame
+fusion_mode <- "both"  # Options: "combined", "per_frame", or "both"
+
+# Define the energy-related columns to be analyzed
+energy_columns <- c("docking.score", "glide.ligand.efficiency", 
+                    "glide.gscore", "glide.emodel", "glide.energy", 
+                    "glide.einternal")
+
+# Define experimental variables to compare (IC50 and pIC50)
+exp_variables <- c("IC50", "pIC50")
+
+# Define the list of Data Fusion Methods to apply
+fusion_methods <- c("Median", "Minimum", "Arithmetic", "Geometric", "Harmonic", "Euclidean")
+
+# -------------------------
+# Create an empty list to store results before combining
+# -------------------------
+
+results_list <- list()  # Usar lista en vez de `bind_rows()` para eficiencia
+
+# -------------------------
+# Iterate over each protein dataset in `filtered_data_list`
+# -------------------------
+
+for (protein_name in names(filtered_data_list)) {
+  data_protein <- filtered_data_list[[protein_name]]
+  
+  cat("\n🔎 Processing Protein:", protein_name, "\n")
+
+  # Definir cómo tratar los frames
+  frame_groups <- list()
+
+  if (fusion_mode == "combined" || fusion_mode == "both") {
+    frame_groups[["All_Frames"]] <- data_protein  
+  }
+  
+  if (fusion_mode == "per_frame" || fusion_mode == "both") {
+    unique_frames <- unique(data_protein$Frame)
+    for (frame_id in unique_frames) {
+      frame_groups[[as.character(frame_id)]] <- filter(data_protein, Frame == frame_id)
+    }
+  }
+
+  
+  for (frame_id in names(frame_groups)) {
+    frame_data <- frame_groups[[frame_id]]
+
+    
+    frame_data$Frame <- as.character(frame_data$Frame)
+
+    # Iterate over each Data Fusion Method
+    for (fusion_method in fusion_methods) {
+      
+      start_pose <- ifelse(fusion_method == "Minimum", 1, 2)
+      #max_poses <- ifelse(fusion_method == "Minimum", 10, 100)  # Define max poses
+      max_poses <- 100  # Set max poses to 100 for all methods, including "Minimum"
+      
+      # Iterate over the number of poses
+      for (i in start_pose:max_poses) {
+        
+        # Filter the dataset to include only the top `i` poses
+        filtered_data <- frame_data %>%
+          filter(Poses <= i)
+
+        # Iterate over each energy-related variable
+        for (energy_col in energy_columns) {
+          
+          # Apply the selected Data Fusion Method
+          if (fusion_method == "Minimum") {
+            fused_data <- minimum_value(filtered_data, energy_col, pose = i)
+          } else if (fusion_method == "Median") {
+            fused_data <- median_value(filtered_data, energy_col)
+          } else if (fusion_method == "Arithmetic") {
+            fused_data <- arithmetic_mean(filtered_data, energy_col)
+          } else if (fusion_method == "Geometric") {
+            fused_data <- geometric_mean(filtered_data, energy_col)
+          } else if (fusion_method == "Harmonic") {
+            fused_data <- harmonic_mean(filtered_data, energy_col)
+          } else if (fusion_method == "Euclidean") {
+            fused_data <- euclidean_mean(filtered_data, energy_col)
+          }
+
+          # Merge the calculated values back with experimental data
+          merged_data <- suppressWarnings(
+            left_join(fused_data, frame_data, by = "Title")
+          )
+
+          # Detect the correct column name after merging
+          fusion_col_name <- colnames(fused_data)[which(colnames(fused_data) != "Title")]
+
+          # Fix .x and .y issues in merged_data
+          if (paste0(fusion_col_name, ".x") %in% colnames(merged_data)) {
+            merged_data <- merged_data %>%
+              rename(!!fusion_col_name := !!sym(paste0(fusion_col_name, ".x"))) %>%
+              select(-one_of(paste0(fusion_col_name, ".y")))
+          }
+
+          # Iterate over IC50 and pIC50 for correlation analysis
+          for (exp_variable in exp_variables) {
+            
+            # Ensure there are no missing values in the correlation calculation
+            valid_data <- merged_data %>%
+              filter(!is.na(.data[[exp_variable]]) & !is.na(.data[[fusion_col_name]]))
+
+            # Count the number of valid data points
+            n_used <- nrow(valid_data)
+            
+            if (n_used < 3) {
+              pose_df <- data.frame(
+                Protein = protein_name,
+                Frame = frame_id,  
+                ExpVariable = exp_variable,
+                DataFusion = fusion_method,
+                EnergyTerm = energy_col,
+                Pose = i,
+                Pearson = NA,
+                Spearman = NA,
+                MAE = NA,
+                RMSE = NA,
+                IRM = NA,  
+                N = n_used,
+                Variant = Variant,
+                Method = Method,
+                stringsAsFactors = FALSE
+              )
+              
+              cat("️ Warning: No valid data for", fusion_method, "- Pose", i, "- EnergyTerm:", energy_col, "- ExpVariable:", exp_variable, "- Protein:", protein_name, "- Frame:", frame_id, "\n")
+              
+            } else {
+              # Compute Pearson and Spearman correlations
+              cor_pearson <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs")
+              cor_spearman <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs", method = "spearman")
+              
+              # Compute MAE, RMSE, and IRM
+              mae_value <- mean(abs(valid_data[[exp_variable]] - valid_data[[fusion_col_name]]), na.rm = TRUE)
+              rmse_value <- sqrt(mean((valid_data[[exp_variable]] - valid_data[[fusion_col_name]])^2, na.rm = TRUE))
+              irm_value <- calculate_irm(valid_data[[exp_variable]], valid_data[[fusion_col_name]])  
+              
+              # Store results in dataframe
+              pose_df <- data.frame(
+                Protein = protein_name,
+                Frame = frame_id, 
+                ExpVariable = exp_variable,
+                DataFusion = fusion_method,
+                EnergyTerm = energy_col,
+                Pose = i,
+                Pearson = round(cor_pearson, 3),
+                Spearman = round(cor_spearman, 3),
+                MAE = round(mae_value, 3),
+                RMSE = round(rmse_value, 3),
+                IRM = round(irm_value, 3),  
+                N = n_used,
+                Variant = Variant,
+                Method = Method,
+                stringsAsFactors = FALSE
+              )
+            }
+            
+            # Append results to the list instead of `bind_rows()`
+            results_list <- append(results_list, list(pose_df))
+            
+          }  # End iteration over IC50 and pIC50
+        }  # End iteration over energy terms
+      }  # End iteration over poses
+      
+      # Garbage collection every 10 poses to prevent memory overload
+      gc()
+    }  # End iteration over frames
+  }  # End iteration over Data Fusion Methods
+}  # End iteration over protein datasets
+
+#  Combine all results into a single dataframe
+results_df <- do.call(rbind, results_list)
+
+# Save results to an Excel file
+write.xlsx(results_df, output_filename)
+
+cat("✅ Data successfully saved to", output_filename, "\n")
+gc()
+
+```

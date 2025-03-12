@@ -1,0 +1,789 @@
+---
+title: "Comparative Data Analysis of Virtual Screening
+Methodologies for Predicting Urease Inhibitory Activity"
+output: html_notebook
+---
+
+## IC50 verification
+
+This segment is not necessary, build a file with the compounds, IC50,
+pIC50 and physicochemical characteristics
+
+```{r}
+
+# Load necessary libraries
+library(dplyr)
+library(readr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the file path
+IC50_check <- "01_EDA/For_IC50.csv"
+
+# -------------------------
+# Step 1: Read the CSV file and identify unique Titles
+# -------------------------
+
+# Read the CSV file, automatically detecting column types
+csv_data <- read_csv(IC50_check, show_col_types = FALSE)
+
+# Ensure that the "Title" column exists before proceeding
+if (!"Title" %in% colnames(csv_data)) {
+  stop("Error: The column 'Title' is missing from the dataset.")
+}
+
+# -------------------------
+# Step 2: Rename columns
+# -------------------------
+
+# Rename columns: "IC50-uM-Exp" -> "IC50", "pIC50" -> "pIC50.Exp"
+csv_data <- csv_data %>%
+  rename(
+    IC50 = `IC50-uM-Exp`
+    #pIC50.Exp = pIC50
+  )
+
+# -------------------------
+# Step 3: Select only the desired columns
+# -------------------------
+
+# Define the columns to keep
+selected_columns <- c(
+  "Title", "#stars", "#amine", "#amidine", "#acid", "#amide", "#rotor", "rtvFG", "CNS", "mol MW", "dipole",
+  "SASA", "FOSA", "FISA", "PISA", "WPSA", "volume", "donorHB", "accptHB", "dip^2/V", "ACxDN^.5/SA", "glob",
+  "QPpolrz", "QPlogPC16", "QPlogPoct", "QPlogPw", "QPlogPo/w", "QPlogS", "CIQPlogS", "QPlogHERG", "QPPCaco",
+  "QPlogBB", "QPPMDCK", "QPlogKp", "IP(eV)", "EA(eV)", "#metab", "QPlogKhsa", "HumanOralAbsorption",
+  "PercentHumanOralAbsorption", "SAfluorine", "SAamideO", "PSA", "#NandO", "RuleOfFive", "RuleOfThree",
+  "#ringatoms", "#in34", "#in56", "#noncon", "#nonHatm", "IC50", "pIC50"
+)
+
+# Ensure only available columns are selected (avoids errors if some are missing)
+available_columns <- intersect(selected_columns, colnames(csv_data))
+csv_data_filtered <- csv_data %>% select(all_of(available_columns))
+
+# -------------------------
+# Step 4: Keep unique Titles and store the final dataframe
+# -------------------------
+
+# Keep only unique rows based on Title while retaining all selected columns
+IC50_data <- csv_data_filtered %>% distinct(Title, .keep_all = TRUE)
+
+# Remove rows where Title ends with " - minimized"
+IC50_data <- IC50_data %>% filter(!grepl(" - minimized$", Title))
+
+# Ensure IC50 is in the second position after Title
+IC50_data <- IC50_data %>% select(Title, IC50, pIC50, everything())
+
+# Calculate pIC50 and place it as the third column
+#IC50_data <- IC50_data %>%
+#  mutate(pIC50 = -log10(IC50 * 1e-6)) %>%
+#  select(Title, IC50, pIC50, everything())  # Ensure correct column order
+
+# Save the processed dataset as a CSV file
+#write_csv(IC50_data, "/media/daniel/DATA2TB/DROP/Dropbox/UCM/Fondecyt_Iniciacion_2022/Aprovado/Etapas/Paper1/Paper_Hp/Analysis/EDA/IC50_data_cleaned_EDA.csv")
+
+
+
+
+
+```
+
+### Dont use!, just count the unique compounds
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(readr)
+
+# -------------------------
+# User Configuration
+# -------------------------
+
+# Define the directory containing the CSV files
+data_dir <- "/media/daniel/DATA2TB/DROP/Dropbox/UCM/Fondecyt_Iniciacion_2022/Aprovado/Etapas/Paper1/Paper_Hp/Analysis/EDA/1/"
+
+# Get a list of all CSV files in the directory
+csv_files <- list.files(path = data_dir, pattern = "*.csv", full.names = TRUE)
+
+# -------------------------
+# Read CSV files and count unique Title values with valid IC50
+# -------------------------
+
+# Function to count unique Titles with valid IC50 values
+count_filtered_unique_titles <- function(file) {
+  data <- read_csv(file, show_col_types = FALSE)  # Read CSV file
+  
+  # Check if required columns exist
+  if (!("Title" %in% colnames(data)) || !("IC50-uM-Exp" %in% colnames(data))) {
+    warning(paste("Warning: Required columns not found in", file))
+    return(data.frame(File = basename(file), Unique_Titles = NA))
+  }
+  
+  # Convert IC50 column to numeric (in case of character format)
+  data <- data %>%
+    mutate(`IC50-uM-Exp` = as.numeric(`IC50-uM-Exp`)) %>%
+    filter(!is.na(`IC50-uM-Exp`))  # Remove NA values in IC50
+  
+  # Count unique values in Title after filtering
+  unique_count <- length(unique(data$Title))
+  
+  return(data.frame(File = basename(file), Unique_Titles = unique_count))
+}
+
+# Apply function to each CSV file and combine results
+filtered_unique_counts <- bind_rows(lapply(csv_files, count_filtered_unique_titles))
+
+# Display the summary table
+print(filtered_unique_counts)
+
+
+
+
+```
+
+## EDA
+
+### Dataset
+
+We use different sets of coumarins molecules already reported (CIAR) as
+inhibitors for urease. These molecules were collected manually from:
+
+-   Paper1: Bis-coumarins; Non-Cytotoxic Selective Urease Inhibitors and
+    Antiglycation Agents. DOI:
+    <https://doi.org/10.1016/j.bioorg.2019.103170>
+
+-   Paper4: Synthesis of 2-Acylated and Sulfonated 4-hydroxycoumarins:
+    In vitro Urease Inhibition and Molecular Docking Studies. DOI:
+    <http://dx.doi.org/10.1016/j.bioorg.2016.04.005>
+
+-   Paper6: Design, synthesis, in vitro evaluation, molecular docking
+    and ADME properties studies of hybrid bis-coumarin with thiadiazole
+    as a new inhibitor of Urease. DOI:
+    <https://doi.org/10.1016/j.bioorg.2019.103235>
+
+-   Paper7: 4-Oxycoumarinyl Linked Acetohydrazide Schiff bases as Potent
+    Urease Inhibitors. DOI:
+    <https://doi.org/10.1016/j.bioorg.2020.104365>
+
+-   Paper8: Exploring biological efficacy of coumarin clubbed
+    thiazolo[3,2--b][1,2,4]tria- zoles as efficient inhibitors of
+    urease: A biochemical and in silico approach. DOI:
+    <https://doi.org/10.1016/j.ijbiomac.2019.09.105>
+
+-   Paper10: Biscoumarin: new class of urease inhibitors; economical
+    synthesis and activity. DOI: <doi:10.1016/j.bmc.2004.01.010>
+
+### Integrate inactive compounds
+
+```{r}
+
+IC50_data$IC50 <- ifelse(is.na(IC50_data$IC50), 800, IC50_data$IC50)
+IC50_data$pIC50 <- ifelse(is.na(IC50_data$pIC50), 3.09, IC50_data$pIC50)
+
+IC50_data$IC50 <- as.numeric(IC50_data$IC50)
+IC50_data$pIC50 <- as.numeric(IC50_data$pIC50)
+```
+
+### Divide inhibitors (active) and non-inhibitors (inactive) by 50 uM
+
+```{r}
+library(dplyr)
+
+#IC50_data <- IC50_data %>%
+#  mutate(activity =
+#                     case_when(IC50 < 50 ~ "UI", 
+#                               IC50 >= 50 ~ "nUI",
+#                               ))
+
+```
+
+```{r}
+library(dplyr)
+
+IC50_data <- IC50_data %>%
+  mutate(activity = case_when(
+    IC50 < 50 ~ "UI", 
+    IC50 >= 50 & IC50 < 800 ~ "nUI",
+    IC50 >= 800 ~ "ND"
+  ))
+
+```
+
+### Histogram IC50
+
+#### UI and nUI (added to the ND)
+
+```{r}
+
+library(ggplot2)
+
+IC <- ggplot(IC50_data, aes(x = IC50)) +
+geom_histogram(fill="#69b3a2", color="black", alpha=0.9) +
+#geom_histogram(data=coumarin_dataset, aes(x = coumarin_dataset$pIC50, fill = coumarin_dataset$pIC50)) +
+theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 12),
+    axis.title = element_text(color = "black", face = "bold", size = 12),
+    axis.text.x = element_text(colour = "black", size = 12),
+    axis.text.y = element_text(colour = "black", size = 12),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, size = 0.5)
+  ) + 
+labs(x = "IC50 (uM)", y = "Count")
+
+#IC
+```
+
+#### UI, nUI and ND
+
+```{r}
+library(ggplot2)
+
+pIC <- ggplot(IC50_data, aes(x = pIC50)) +
+geom_histogram(fill="#69b3a2", color="black", alpha=0.9) +
+#geom_histogram(data=coumarin_dataset, aes(x = coumarin_dataset$pIC50, fill = coumarin_dataset$pIC50)) +
+theme(
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 12),
+    axis.title = element_text(color = "black", face = "bold", size = 12),
+    axis.text.x = element_text(colour = "black", size = 12),
+    axis.text.y = element_text(colour = "black", size = 12),
+    axis.ticks = element_line(colour = "black", size = 0.5),
+    panel.border = element_rect(colour = "black", fill = NA, size = 0.5)
+  ) + 
+labs(x = "pIC50", y = "Count")
+
+#pIC
+
+```
+
+```{r}
+library(gridExtra)
+Hist <- grid.arrange(IC, pIC, nrow=2)
+
+Hist
+
+#ggsave("Hist_IC50.tiff", plot = Hist,  width = 6.7, height = 5, dpi = 600, device = "tiff")
+```
+
+### Correlation heatmap
+
+| Rule | Key Parameters |
+|------|----------------|
+
+|                             |                                             |
+|----------------------------|-------------------------------------------|
+| **Lipinski's Rule of Five** | `mol MW`, `QPlogPo/w`, `donorHB`, `accptHB` |
+
+|                  |                                       |
+|------------------|---------------------------------------|
+| **Veber's Rule** | `#rotor`, `PSA`, `donorHB`, `accptHB` |
+
+|                      |                                             |
+|----------------------|---------------------------------------------|
+| **Jorgensen's Rule** | `QPlogPo/w`, `QPlogS`, `QPPCaco`, `QPlogBB` |
+
+|                      |        |
+|----------------------|--------|
+| **Activity Metrics** | `IC50` |
+
+```{r}
+
+# Load necessary libraries
+library(ggcorrplot)
+library(ggplot2)
+library(dplyr)
+
+# -------------------------
+# Select Key Features for Correlation Analysis
+# -------------------------
+
+# Define the selected properties for Lipinski, Veber, and Jorgensen rules
+selected_features <- c( "IC50",  "mol MW", "QPlogPo/w", "donorHB", "accptHB", 
+                       "#rotor", "PSA", "QPlogS", "QPPCaco", "QPlogBB")
+
+# Ensure only available columns are selected (avoid errors if some are missing)
+available_features <- intersect(selected_features, colnames(IC50_data))
+
+# Filter dataset to include only selected properties
+filtered_data <- IC50_data %>% select(all_of(available_features))
+
+# Compute correlation matrix
+cor_matrix <- cor(filtered_data, use = "complete.obs")
+
+# -------------------------
+# Generate Improved Correlation Heatmap
+# -------------------------
+
+# Create a cleaner heatmap with better legend formatting
+correlation_heatmap <- ggcorrplot(cor_matrix, method = "square", type = "lower",
+           lab = TRUE, lab_size = 3,  # Adjust correlation number size
+           show.legend = TRUE,
+           colors = c("blue", "white", "red"),
+           title = "") +
+  theme(
+    legend.position = "right",  # Move legend to the right
+    legend.direction = "vertical",  # Make legend vertical
+    legend.key.width = unit(0.2, "cm"),  # Narrower legend bar
+    legend.key.height = unit(1, "cm"),  # Taller legend bar
+    legend.title = element_text(size = 12, face = "bold"),  # Adjust legend title size
+    legend.text = element_text(size = 12),  # Adjust legend label size
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  ) +
+  guides(fill = guide_colorbar(title = "", title.position = "top"))
+
+
+
+correlation_heatmap
+
+#ggsave("correlation_heatmap.tiff", plot = correlation_heatmap,  width = 6.7, height = 5, dpi = 600, device = "tiff")
+
+
+
+
+```
+
+### pIC50 vs ROF
+
+#### UI and nUI (added to the ND)
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Ensure 'activity' is a factor
+IC50_data$activity <- factor(IC50_data$activity, levels = c("UI", "nUI"))
+
+# Generate improved boxplot
+enzimatic_activity <- ggplot(IC50_data, aes(x = factor(RuleOfFive), y = pIC50, fill = activity)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +  # Reduce outlier visibility
+  #geom_jitter(aes(color = activity), width = 0.2, alpha = 0.6, size = 2) +  # Add jitter points
+  scale_fill_manual(values = c("UI" = "red", "nUI" = "blue")) +  # Custom colors
+  #scale_color_manual(values = c("UI" = "darkred", "nUI" = "darkblue")) +  # Jitter color match
+  labs(title = "",
+       x = "Rule of Five Violations",
+       y = "pIC50",
+       fill = "Activity") +  # Legend title
+  theme_minimal() +
+  theme(
+    legend.position = "right",  # Move legend above the plot
+    legend.direction = "vertical",  # Make legend vertical
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(color = "black", face = "bold", size = 12),
+    axis.text.x = element_text(colour = "black", size = 12),
+    axis.text.y = element_text(colour = "black", size = 12),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  )
+
+enzimatic_activity
+
+#ggsave("Activity2.tiff", plot = enzimatic_activity,  width = 6.7, height = 5, dpi = 600, device = "tiff")
+
+```
+
+#### UI, nUI and ND
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Ensure activity is categorized correctly, including ND
+IC50_data <- IC50_data %>%
+  mutate(activity = factor(case_when(
+    IC50 < 50 ~ "UI",
+    IC50 >= 50 & IC50 < 800 ~ "nUI",
+    IC50 >= 800 ~ "ND"
+  ), levels = c("UI", "nUI", "ND")))  # Ensure ND appears in legend
+
+# Generate improved boxplot including ND
+enzimatic_activity <- ggplot(IC50_data, aes(x = factor(RuleOfFive), y = pIC50, fill = activity)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.6) +  # Reduce outlier visibility
+  #geom_jitter(aes(color = activity), width = 0.2, alpha = 0.6, size = 2) +  # Add jitter points
+  scale_fill_manual(values = c("UI" = "red", "nUI" = "blue", "ND" = "green")) +  # Add ND color
+  #scale_color_manual(values = c("UI" = "darkred", "nUI" = "darkblue", "ND" = "black")) +  # Jitter color match
+  labs(title = "",
+       x = "Rule of Five Violations",
+       y = "pIC50",
+       fill = "Activity") +  # Legend title
+  theme_minimal() +
+  theme(
+    legend.position = "right",  # Move legend to the right
+    legend.direction = "vertical",  # Make legend vertical
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(color = "black", face = "bold", size = 12),
+    axis.text.x = element_text(colour = "black", size = 12),
+    axis.text.y = element_text(colour = "black", size = 12),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  )
+
+enzimatic_activity
+
+# Save plot with high resolution
+ggsave("Activity.tiff", plot = enzimatic_activity, width = 6.7, height = 5, dpi = 600, device = "tiff")
+
+```
+
+### PCA
+
+#### UI and nUI (added to the ND)
+
+```{r}
+library(ggplot2)
+library(ggfortify)
+library(ggrepel)
+library(dplyr)
+
+# Ensure 'activity' is a factor with UI and nUI as levels
+IC50_data <- IC50_data %>%
+  mutate(activity = factor(activity, levels = c("UI", "nUI")))
+
+# Select numeric columns, ensuring no zero-variance ones are included
+numeric_data <- IC50_data %>% select(where(is.numeric))
+
+# Remove zero-variance columns
+zero_variance_cols <- numeric_data %>% summarise(across(everything(), var, na.rm = TRUE)) %>%
+  select(where(~ . == 0)) %>% colnames()
+numeric_data_filtered <- numeric_data %>% select(-all_of(zero_variance_cols))
+
+# Perform PCA
+pca_results <- prcomp(numeric_data_filtered, center = TRUE, scale. = TRUE)
+
+# Extract loadings (variable contributions)
+loadings <- as.data.frame(pca_results$rotation[, 1:2])
+loadings$Variable <- rownames(loadings)
+
+# Filter only the most important loadings (based on absolute contribution)
+top_loadings <- loadings %>%
+  arrange(desc(abs(PC1) + abs(PC2))) %>%
+  slice(1:10)  # Show only the 15 most important variables
+
+# Create PCA biplot
+pca <- autoplot(pca_results, data = IC50_data, colour = 'activity', shape = TRUE, alpha = 0.6) +
+  stat_ellipse(aes(color = activity), level = 0.95) +  # Confidence ellipses
+  geom_segment(data = top_loadings, aes(x = 0, y = 0, xend = PC1, yend = PC2), 
+               arrow = arrow(length = unit(0.2, "cm")), color = "black") +  # Add arrows for loadings
+  geom_text_repel(data = top_loadings, aes(x = PC1, y = PC2, label = Variable), 
+                  size = 5, color = "black", max.overlaps = 10) +  # Repel overlapping labels
+  scale_color_manual(values = c("UI" = "red", "nUI" = "blue")) +  # Custom colors
+  scale_shape_manual(values = c("UI" = 17, "nUI" = 16)) +  # Different shapes
+  labs(title = "",
+       x = paste0("PC1 (", round(pca_results$sdev[1]^2 / sum(pca_results$sdev^2) * 100, 1), "%)"),
+       y = paste0("PC2 (", round(pca_results$sdev[2]^2 / sum(pca_results$sdev^2) * 100, 1), "%)"),
+       color = "Activity",
+       shape = "Activity") +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    legend.direction = "vertical",
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(color = "black", face = "bold", size = 12),
+    axis.text.x = element_text(colour = "black", size = 12),
+    axis.text.y = element_text(colour = "black", size = 12),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),  
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  )
+
+pca
+
+ggsave("pca2.tiff", plot = pca,  width = 6.7, height = 5, dpi = 600, device = "tiff")
+```
+
+#### UI, nUI and ND
+
+```{r}
+library(ggplot2)
+library(ggfortify)
+library(ggrepel)
+library(dplyr)
+
+# Ensure 'activity' is a factor with UI, nUI, and ND as levels
+IC50_data <- IC50_data %>%
+  mutate(activity = factor(activity, levels = c("UI", "nUI", "ND")))
+
+# Select numeric columns, ensuring no zero-variance ones are included
+numeric_data <- IC50_data %>% select(where(is.numeric))
+
+# Remove zero-variance columns
+zero_variance_cols <- numeric_data %>% summarise(across(everything(), var, na.rm = TRUE)) %>%
+  select(where(~ . == 0)) %>% colnames()
+numeric_data_filtered <- numeric_data %>% select(-all_of(zero_variance_cols))
+
+# Perform PCA
+pca_results <- prcomp(numeric_data_filtered, center = TRUE, scale. = TRUE)
+
+# Extract loadings (variable contributions)
+loadings <- as.data.frame(pca_results$rotation[, 1:2])
+loadings$Variable <- rownames(loadings)
+
+# Filter only the most important loadings (based on absolute contribution)
+top_loadings <- loadings %>%
+  arrange(desc(abs(PC1) + abs(PC2))) %>%
+  slice(1:10)  # Show only the 10 most important variables
+
+# Create PCA biplot
+pca <- autoplot(pca_results, data = IC50_data, colour = 'activity', shape = TRUE, alpha = 0.6) +
+  stat_ellipse(aes(color = activity), level = 0.95) +  # Confidence ellipses
+  geom_segment(data = top_loadings, aes(x = 0, y = 0, xend = PC1, yend = PC2), 
+               arrow = arrow(length = unit(0.2, "cm")), color = "black") +  # Add arrows for loadings
+  geom_text_repel(data = top_loadings, aes(x = PC1, y = PC2, label = Variable), 
+                  size = 5, color = "black", max.overlaps = 10) +  # Repel overlapping labels
+  scale_color_manual(values = c("UI" = "red", "nUI" = "blue", "ND" = "green")) +  # Add ND (green)
+  scale_shape_manual(values = c("UI" = 17, "nUI" = 16, "ND" = 15)) +  # Different shapes for ND
+  labs(title = "",
+       x = paste0("PC1 (", round(pca_results$sdev[1]^2 / sum(pca_results$sdev^2) * 100, 1), "%)"),
+       y = paste0("PC2 (", round(pca_results$sdev[2]^2 / sum(pca_results$sdev^2) * 100, 1), "%)"),
+       color = "Activity",
+       shape = "Activity") +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    legend.direction = "vertical",
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(color = "black", face = "bold", size = 12),
+    axis.text.x = element_text(colour = "black", size = 12),
+    axis.text.y = element_text(colour = "black", size = 12),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),  
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  )
+
+pca
+
+# Save the plot as high-resolution TIFF
+#ggsave("pca.tiff", plot = pca, width = 6.7, height = 5, dpi = 600, device = "tiff")
+
+```
+
+### ROF distribution
+
+#### UI and nUI (added to the ND)
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Ensure 'activity' is a factor
+IC50_data$activity <- factor(IC50_data$activity, levels = c("UI", "nUI"))
+
+# Create bar plot with UI and nUI separation
+ROF_distribution <- ggplot(IC50_data, aes(x = factor(RuleOfFive), fill = activity)) +
+  geom_bar(position = "dodge", alpha = 0.8) +  # Side-by-side bars
+  scale_fill_manual(values = c("UI" = "red", "nUI" = "blue")) +  # Custom colors
+  labs(title = "",
+       x = "Violations",
+       y = "Count",
+       fill = "Activity") +  # Legend title
+  theme_minimal() +
+  theme(
+    legend.position = "right",  # Move legend to the right
+    legend.direction = "vertical",  # Make legend vertical
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(color = "black", face = "bold", size = 12),
+    axis.text.x = element_text(colour = "black", size = 12),
+    axis.text.y = element_text(colour = "black", size = 12),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  )
+
+ROF_distribution
+
+ggsave("ROF_distribution2.tiff", plot = ROF_distribution,  width = 6.7, height = 5, dpi = 600, device = "tiff")
+```
+
+#### UI, nUI and ND
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Ensure 'activity' is a factor with UI, nUI, and ND as levels
+IC50_data$activity <- factor(IC50_data$activity, levels = c("UI", "nUI", "ND"))
+
+# Create bar plot with UI, nUI, and ND separation
+ROF_distribution <- ggplot(IC50_data, aes(x = factor(RuleOfFive), fill = activity)) +
+  geom_bar(position = "dodge", alpha = 0.8) +  # Side-by-side bars
+  scale_fill_manual(values = c("UI" = "red", "nUI" = "blue", "ND" = "green")) +  # Add ND color
+  labs(title = "",
+       x = "Violations",
+       y = "Count",
+       fill = "Activity") +  # Legend title
+  theme_minimal() +
+  theme(
+    legend.position = "right",  # Move legend to the right
+    legend.direction = "vertical",  # Make legend vertical
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 12),
+    axis.title = element_text(color = "black", face = "bold", size = 12),
+    axis.text.x = element_text(colour = "black", size = 12),
+    axis.text.y = element_text(colour = "black", size = 12),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = "white"),
+    plot.background = element_rect(fill = "white", color = "white")
+  )
+
+ROF_distribution
+
+# Save the plot as high-resolution TIFF
+#ggsave("ROF_distribution2.tiff", plot = ROF_distribution, width = 6.7, height = 5, dpi = 600, device = "tiff")
+
+```
+
+# Volume in protein frames
+
+```{r}
+
+library(readxl)
+library(dplyr)
+library(stringr)
+
+# Excel name
+file_path <- "01_EDA/Volume_Proteins.xlsx"
+
+# Sheet names
+sheets <- c("1E9Z", "1E9Y", "6QSU", "6ZJA")
+
+# 
+read_and_process_sheet <- function(sheet) {
+  df <- read_excel(file_path, sheet = sheet)  
+  
+  # Rename columns
+  colnames(df)[1] <- "Protein"
+  colnames(df)[3] <- "Area"
+  colnames(df)[4] <- "Volume"
+  
+  # Check number of columns
+  if (ncol(df) < 4) {
+    stop(paste("Error: La hoja", sheet, "less of 4 columns."))
+  }
+  
+  df <- df %>%
+    mutate(Protein = gsub("_chainB", "", Protein)) %>% 
+    mutate(Sheet = sheet) %>%  
+    mutate(
+      Area = as.numeric(str_replace(Area, "(\\d{3})$", ".\\1")),   
+      Volume = as.numeric(str_replace(Volume, "(\\d{3})$", ".\\1")) 
+    )
+  
+  return(df)
+}
+
+# Read all the sheets and combine them
+combined_df <- bind_rows(lapply(sheets, function(sheet) {
+  tryCatch(
+    read_and_process_sheet(sheet),
+    error = function(e) {
+      message(paste("Error al leer la hoja:", sheet, "\n", e))
+      return(NULL)
+    }
+  )
+}))
+
+# 
+head(combined_df)
+
+# 
+if (!"Frame" %in% colnames(combined_df)) {
+  combined_df <- combined_df %>%
+    mutate(Frame = as.character(NA))  
+} else {
+  combined_df <- combined_df %>%
+    mutate(Frame = as.character(Frame))  
+}
+
+
+new_rows <- data.frame(
+  Protein = c("6ZJA", "6QSU", "1E9Y", "1E9Z"),
+  Frame = c("Crystal", "Crystal", "Crystal", "Crystal"),
+  Area = c(379.379, 242.700, 276.773, 108.058),  
+  Volume = c(300.364, 132.359, 171.188, 30.792),
+  Sheet = NA_character_  # Mantener el mismo tipo de dato
+)
+
+
+combined_df <- bind_rows(combined_df, new_rows)
+
+
+```
+
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+library(gtools)
+
+# Modify the theme to ensure the Y axis is bold
+custom_theme <- theme(
+  legend.position = "top",
+  legend.title = element_blank(),
+  legend.key.size = unit(1, "cm"),
+  legend.text = element_text(color = "black", size = 18),
+  axis.title.x = element_text(color = "black", face = "bold", size = 22),  # Eje X en negrita
+  axis.title.y = element_text(color = "black", face = "bold", size = 22),  # Eje Y en negrita
+  axis.text.x = element_text(colour = "black", face = "bold", size = 20, angle = 45, hjust = 1),
+  axis.text.y = element_text(colour = "black", face = "bold", size = 20),
+  axis.ticks = element_line(colour = "black", size = 0.5),
+  panel.border = element_rect(colour = "black", fill = NA, size = 0.5),
+  panel.background = element_rect(fill = "gray90", color = NA),  # Fondo gris
+  panel.grid.major = element_line(color = "white", size = 0.5),  # Líneas principales en blanco
+  panel.grid.minor = element_line(color = "white", size = 0.3),
+  plot.title = element_text(size = 24, face = "bold")
+)
+
+
+
+  #strip.text = element_text(size = 18, face = "bold")
+
+
+
+
+# Modify the line in `labs()` for the Y axis
+create_plot <- function(protein_data) {
+  protein_data <- protein_data %>%
+    mutate(Frame = factor(Frame, 
+                          levels = c("Crystal", mixedsort(setdiff(unique(Frame), "Crystal"))), 
+                          ordered = TRUE))  
+
+  ggplot(protein_data, aes(x = Frame, y = Volume, fill = Frame == "Crystal")) +
+    geom_bar(stat = "identity", position = "dodge") +  
+    scale_fill_manual(values = c("#009081", "black"), labels = c("Frames", "Crystal")) +  
+   labs(title = unique(protein_data$Protein), x = "Frame", y = bquote(bold(Volume ~ (Å^3))), fill = "") +
+    ylim(0, 800) +  
+    custom_theme  # Aplicar el theme corregido
+}
+
+# Create graphs for each protein
+plots <- lapply(split(combined_df, combined_df$Protein), create_plot)
+
+# Combine all charts
+Hist <- grid.arrange(grobs = plots, ncol = 1)  # Ajusta ncol según sea necesario
+
+# Display chart combination
+print(Hist)
+
+# Save to PDF and TIFF with new Y-axis limits
+#ggsave("Volume_proteins.pdf", plot = Hist, width = 16, height = 14, dpi = 300)
+ggsave("Volume_proteins.tiff", plot = Hist, width = 16, height = 14, dpi = 300)
+```
