@@ -286,29 +286,29 @@ for (protein_name in names(filtered_data_list)) {
 
     for (i in start_pose:10) {
       
-      # Filtrar los datos por poses
+      # Filter data by poses
       filtered_data <- data_protein %>%
         filter(Poses <= i)  
 
       for (energy_col in energy_columns) {
         
-        # Aplicar la técnica de Data Fusion
+        # Apply the Data Fusion technique
         if (fusion_method == "Minimum") {
           fused_data <- apply_data_fusion(filtered_data, fusion_method, energy_col, pose = i)  
         } else {
           fused_data <- apply_data_fusion(filtered_data, fusion_method, energy_col)
         }
         
-        # Detectar el nombre correcto de la columna fusionada
+        #Detect the correct name of the merged column
         fusion_col_name <- colnames(fused_data)[which(colnames(fused_data) != "Title")]
 
-        # Merge con datos experimentales
+        # Merge with experimental data
         merged_data <- left_join(fused_data, data_protein[, c("Title", exp_variables)], by = "Title")
         
-        # Iterar sobre IC50 y pIC50
+        # Iterate over IC50 and pIC50
         for (exp_variable in exp_variables) {
           
-          # Filtrar valores no nulos para cálculos
+          # Filter non-null values for calculations
           valid_data <- merged_data %>%
             filter(!is.na(.data[[exp_variable]]) & !is.na(.data[[fusion_col_name]]))
 
@@ -333,7 +333,7 @@ for (protein_name in names(filtered_data_list)) {
             )
             
           } else {
-            # Cálculo de correlaciones y métricas
+            # Calculating correlations and metrics
             cor_pearson <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs")
             cor_spearman <- cor(valid_data[[exp_variable]], valid_data[[fusion_col_name]], use = "complete.obs", method = "spearman")
             mae_value <- mean(abs(valid_data[[exp_variable]] - valid_data[[fusion_col_name]]), na.rm = TRUE)
@@ -581,13 +581,13 @@ for (protein_name in names(filtered_data_list)) {
 
     for (i in start_pose:max_poses) {
       
-      # Filtrar los datos por poses
+      # Filter data by poses
       filtered_data <- data_protein %>%
         filter(Poses <= i)  
 
       for (energy_col in energy_columns) {
         
-        # Aplicar la técnica de Data Fusion
+        # Apply the Data Fusion technique
         if (fusion_method == "Median") {
           fused_data <- median_value(filtered_data, energy_col)
         } else if (fusion_method == "Minimum") {
@@ -1824,7 +1824,7 @@ for (protein_name in names(filtered_data_list)) {
   
   cat("\n🔎 Processing Protein:", protein_name, "\n")
 
-  # Definir cómo tratar los frames
+  # Define how to treat frames
   frame_groups <- list()
 
   if (fusion_mode == "combined" || fusion_mode == "both") {
@@ -1838,11 +1838,11 @@ for (protein_name in names(filtered_data_list)) {
     }
   }
 
-  # Iterar sobre cada opción de agrupación de frames (todos o por separado)
+  # Iterate over each frame grouping option (all or separately)
   for (frame_id in names(frame_groups)) {
     frame_data <- frame_groups[[frame_id]]
 
-    # Asegurar que la columna `Frame` es un string
+    #Ensure that the `Frame` column is a string
     frame_data$Frame <- as.character(frame_data$Frame)
 
     # Iterate over each Data Fusion Method
@@ -1855,7 +1855,7 @@ for (protein_name in names(filtered_data_list)) {
       # Iterate over the number of poses
       for (i in start_pose:max_poses) {
         
-        # Verificar si hay suficientes poses en el conjunto de datos
+        # Check if there are enough poses in the dataset
         available_poses <- unique(frame_data$Poses)
         if (!i %in% available_poses) {
           cat(" Skipping Pose", i, "for", fusion_method, "- Frame:", frame_id, "(Not enough poses available)\n")
@@ -2175,7 +2175,7 @@ for (protein_name in names(filtered_data_list)) {
   
   cat("\n🔎 Processing Protein:", protein_name, "\n")
 
-  # Definir cómo tratar los frames
+  # Define how to treat frames
   frame_groups <- list()
 
   if (fusion_mode == "combined" || fusion_mode == "both") {
